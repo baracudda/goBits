@@ -54,11 +54,9 @@ func (d DriverInfo) SetDriverName( driverName string ) DriverInfo {
 	return d
 }
 
-func RegisterDriverInfo( driverName string, db *sql.DB ) {
-	if db != nil {
-		driverType := reflect.TypeOf(db.Driver())
-		DriverMeta[driverType] = DriverInfo{Type: driverType}.SetDriverName(driverName)
-	}
+func RegisterDriverInfo( driverName string, dbDriver interface{} ) {
+	driverType := reflect.TypeOf(dbDriver)
+	DriverMeta[driverType] = DriverInfo{Type: driverType}.SetDriverName(driverName)
 }
 
 func init() {
@@ -66,14 +64,16 @@ func init() {
 	for _, driverName := range sql.Drivers() {
 		// Tested empty string DSN with MySQL, PostgreSQL, and SQLite3 drivers.
 		db, _ := sql.Open(driverName, "")
-		RegisterDriverInfo(driverName, db)
+		if db != nil {
+			RegisterDriverInfo(driverName, db.Driver())
+		}
 	}
 }
 
 // THANKS TO rbranson: https://github.com/golang/go/issues/12600#issuecomment-378363201
 // The database/sql API doesn't provide a way to get the registry name for
 // a driver from the driver type.
-func sqlDriverToDriverName(driver driver.Driver) DriverName {
+func SqlDriverToDriverName(driver driver.Driver) DriverName {
 	driverType := reflect.TypeOf(driver)
 	if driverInfo, found := DriverMeta[driverType]; found {
 		return driverInfo.Name
@@ -81,8 +81,8 @@ func sqlDriverToDriverName(driver driver.Driver) DriverName {
 	return ""
 }
 
-func GetDriverMeta(db *sql.DB) *DriverInfo {
-	driverType := reflect.TypeOf(db.Driver())
+func GetDriverMeta(dbDriver interface{}) *DriverInfo {
+	driverType := reflect.TypeOf(dbDriver)
 	if driverInfo, found := DriverMeta[driverType]; found {
 		return &driverInfo
 	}
