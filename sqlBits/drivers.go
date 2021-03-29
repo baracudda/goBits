@@ -88,3 +88,14 @@ func GetDriverMeta(dbDriver interface{}) *DriverInfo {
 	}
 	return nil
 }
+
+type DbMetatater interface {
+	GetDbMeta() *DriverInfo
+}
+
+type DbTransactioner interface {
+	InTransaction() bool
+	BeginTransaction()
+	CommitTransaction()
+	RollbackTransaction()
+}

@@ -15,12 +15,37 @@
  */
 package sqlBits
 
-import "database/sql"
+import (
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type DbModeler interface {
+	DbMetatater
+	DbTransactioner
+}
+
+type IDataSource interface {
+	IsKeyDefined( aKey string ) bool
+	IsKeyValueAList( aKey string ) bool
+	GetValueForKey( aKey string ) *string
+	GetValueListForKey( aKey string ) *[]string
+}
 
 // Use this class to help build SQL queries.
 // Supports: MySQL and Postgres.
 type Builder struct {
-	db *sql.DB
+	// Database model used to tweak SQL dialect specifics.
+	myDbModel       DbModeler
+	// Used to determine if we started a transaction or not.
+	// The flag is incremented every time a transaction is requested
+	//   and decremented when commited; only begins/commits when transitioning
+	//   from 0 to 1 and back to 0. This allows us to "nest" transactions.
+	myTransactionFlag int
+	// If set, parameter data is retrieved from it.
+	myDataSource IDataSource
+
 	/**
 	 * The object used to sanitize field/orderby lists to help prevent
 	 * SQL injection attacks.
@@ -29,837 +54,504 @@ type Builder struct {
 	//public $mySqlSanitizer = null;
 
 	// The SQL string being built.
-	mySql        string
-	myParams     []string
-	myParamTypes []string
-}
-/*
-	/**
-	 * Using the "=" when NULL is involved is ambiguous unless you know
-	 * if it is part of a SET clause or WHERE clause.  Explicitly set
-	 * this flag to let the SqlBuilder know it is in a WHERE clause.
-	 * @var boolean
-	 * /
-	public $bUseIsNull = false;
+	mySql           string
+	// SQL statement parameters to use (contains all keys from mySetParams, too).
+	myParams        map[string]*string
+	// SQL statement set parameters to use.
+	mySetParams     map[string]*[]string
+	// SQL statement parameter types (not sure if we need them, yet)
+	//myParamTypes    map[string]string
+	// Prefix for a parameter about to be added.
+	myParamPrefix   string
+	// Operator for the parameter to use. e.g. " LIKE ", "=", "<>", etc.
+	myParamOperator string
 
-	/**
-	 * Temporary parameter prefix used while constructing the SQL string.
-	 * @var string
-	 * /
-	public $myParamPrefix = ' ';
-	/**
-	 * Temporary operator used while constructing the SQL string.
-	 * @var string
-	 * /
-	public $myParamOperator = '=';
-	/**
-	 * Temporary parameter type used while constructing the SQL string.
-	 * @var string
-	 * /
-	public $myParamType = \PDO::PARAM_STR;
-	/**
-	 * Used to determine if we started a transaction or not.
-	 * @var int Flag is incremented every time a transaction is requested
-	 *   and decremented when commited; only begins/commits when transitioning
-	 *   from 0 to 1 and back to 0. This allows us to "nest" transactions.
-	 * /
-	public $myTransactionFlag = 0;
+	// Using the "=" when NULL is involved is ambiguous unless you know
+	// if it is part of a SET clause or WHERE clause.  Explicitly set
+	// this flag to let the SqlBuilder know it is in a WHERE clause.
+	bUseIsNull bool
+
 }
 
-func SetDb( aDb *sql.DB ) *Builder {
-	if aDb == nil { panic("no DB defined!") } //trivial
-	b := &Builder{
-		db: aDb,
+// Models can use this package to help build their SQL queries.
+func NewBuilder( aDbModeler DbModeler ) *Builder {
+	if aDbModeler == nil { panic("no DbModeler defined!") } //trivial
+	sqlbldr := new(Builder)
+	sqlbldr.myDbModel = aDbModeler
+	sqlbldr.myTransactionFlag = 0
+	return sqlbldr.Reset()
+}
+
+// Resets the object so it can be resused without creating a new instance.
+func (sqlbldr *Builder) Reset() *Builder {
+	sqlbldr.mySql = ""
+	sqlbldr.myParams = map[string]*string{}
+	sqlbldr.mySetParams = map[string]*[]string{}
+	//sqlbldr.myParamTypes = map[string]string{}
+	sqlbldr.myParamPrefix = " "
+	sqlbldr.myParamOperator = "="
+	sqlbldr.bUseIsNull = false
+	return sqlbldr
+}
+
+// If we are not already in a transaction, start one.
+func (sqlbldr *Builder) BeginTransaction() *Builder {
+	if sqlbldr.myTransactionFlag < 1 {
+		if !sqlbldr.myDbModel.InTransaction() {
+			sqlbldr.myDbModel.BeginTransaction()
+		}
 	}
-	if b.db.Driver().
-		identifier_delimiter: '`',
-
+	sqlbldr.myTransactionFlag += 1
+	return sqlbldr
 }
 
-/**
- * Magic PHP method to limit what var_dump() shows.
- * /
-public function __debugInfo()
-{
-$vars = parent::__debugInfo();
-unset($vars['myModel']);
-unset($vars['mySqlSanitizer']);
-return $vars;
+// If we started a transaction earlier, commit it.
+func (sqlbldr *Builder) CommitTransaction() *Builder {
+	if sqlbldr.myTransactionFlag > 0 {
+		if sqlbldr.myTransactionFlag -= 1; sqlbldr.myTransactionFlag == 0 {
+			sqlbldr.myDbModel.CommitTransaction()
+		}
+	}
+	return sqlbldr
 }
 
-/**
- * Models can use this class to help build their SQL queries / PDO statements.
- * @param \BitsTheater\Model $aModel - the model being used.
- * @return $this Returns the created object.
- * /
-static public function withModel( Model $aModel )
-{
-$theClassName = get_called_class();
-$o = new $theClassName($aModel->director);
-return $o->setModel($aModel);
+// If we started a transaction earlier, roll it back.
+func (sqlbldr *Builder) RollbackTransaction() *Builder {
+	if sqlbldr.myTransactionFlag > 0 {
+		if sqlbldr.myTransactionFlag -= 1; sqlbldr.myTransactionFlag == 0 {
+			sqlbldr.myDbModel.RollbackTransaction()
+		}
+	}
+	return sqlbldr
 }
 
-/**
- * Sets the model being used along with initializing database specific quirks.
- * @param \BitsTheater\Model $aModel
- * @return $this Returns $this for chaining.
- * /
-public function setModel( Model $aModel )
-{
-$this->myModel = $aModel;
-switch ($this->myModel->dbType()) {
-case Model::DB_TYPE_MYSQL:
-default:
-$this->identifier_delimiter = '`';
-}//switch
-return $this;
+// Quoted identifiers are DB vendor specific so providing a helper method to just
+// return a properly quoted string for MySQL vs MSSQL vs Oracle, etc. is handy.
+func (sqlbldr *Builder) GetQuoted( aIdentifier string ) string {
+	delim := string(sqlbldr.myDbModel.GetDbMeta().IdentifierDelimiter)
+	return delim + strings.Replace(aIdentifier, delim, delim+delim, -1) + delim
 }
 
-/**
- * Sets the dataset to be used by addParam methods.
- * @param array or StdClass $aDataSet - array or class used to get param data.
- * @return $this Returns $this for chaining.
- * @deprecated Please use {@link SqlBuilder::obtainParamsFrom()}
- * /
-public function setDataSet( $aDataSet )
-{
-$this->myDataSet = $aDataSet;
-return $this;
+// Sets the SQL string to this value to build upon.
+func (sqlbldr *Builder) StartWith( aSql string ) *Builder {
+	sqlbldr.mySql = aSql
+	return sqlbldr
 }
 
-/**
- * Sets the dataset to be used by addParam methods. Alias for setDataSet().
- * @param array or StdClass $aDataSet - array or class used to get param data.
- * @return $this Returns $this for chaining.
- * /
-public function obtainParamsFrom( $aDataSet )
-{
-$this->myDataSet = $aDataSet;
-return $this;
+// Some operators require alternate handling during WHERE clauses
+// (e.g. "=" with NULLs). Similar to StartWhereClause(), this method is
+// specific to building a filter that consists entirely of a
+// partial WHERE clause which will get appended to the main SqlBuilder
+// using ApplyFilter().
+func (sqlbldr *Builder) StartFilter() *Builder {
+	sqlbldr.bUseIsNull = true
+	sqlbldr.StartWith("1")
+	return sqlbldr.SetParamPrefix(" AND ")
 }
+
+// Set our param value source.
+func (sqlbldr *Builder) SetDataSource( aDataSource IDataSource ) *Builder {
+	sqlbldr.myDataSource = aDataSource
+	return sqlbldr
+}
+
+// Sets the param value and param type, but does not affect the SQL string.
+func (sqlbldr *Builder) SetParam( aParamKey string, aParamValue string ) *Builder {
+	s := aParamValue
+	return sqlbldr.SetNullableParam(aParamKey, &s)
+}
+
+// Sets the param value and param type, but does not affect the SQL string.
+func (sqlbldr *Builder) SetNullableParam( aParamKey string, aParamValue *string ) *Builder {
+	sqlbldr.myParams[aParamKey] = aParamValue
+	//sqlbldr.myParamTypes[aParamKey] = "string"
+	return sqlbldr
+}
+
+// Sets the param value set, but does not affect the SQL string.
+func (sqlbldr *Builder) SetParamSet( aParamKey string, aParamValues *[]string ) *Builder {
+	sqlbldr.myParams[aParamKey] = nil
+	sqlbldr.mySetParams[aParamKey] = aParamValues
+	//sqlbldr.myParamTypes[aParamKey] = "string"
+	return sqlbldr
+}
+
+// Inquire if the data that will be used for a particular param is a set or not.
+func (sqlbldr *Builder) IsParamASet( aParamKey string ) bool {
+	_, ok := sqlbldr.myParams[aParamKey]
+	if ok {
+		//if key exists in myParams, then result is if key also exists in mySetParams
+		_, ok := sqlbldr.mySetParams[aParamKey]
+		return ok
+	} else if sqlbldr.myDataSource != nil {
+		//if key non-existant, check myDataSource
+		return sqlbldr.myDataSource.IsKeyValueAList(aParamKey)
+	}
+	//no clue about this param, return false
+	return false
+}
+
+// Gets the current value of a param that has been added.
+func (sqlbldr *Builder) GetParam( aParamKey string ) *string {
+	val, ok := sqlbldr.myParams[aParamKey]
+	if ok {
+		return val
+	} else {
+		return nil
+	}
+}
+
+// Gets the current value of a param that has been added.
+func (sqlbldr *Builder) GetParamSet( aParamKey string ) *[]string {
+	valSet, ok := sqlbldr.mySetParams[aParamKey]
+	if ok {
+		return valSet
+	} else {
+		return nil
+	}
+}
+
+// Some SQL drivers require all query parameters be unique. This poses an issue when multiple
+// datakeys with the same name are needed in the query (especially true for MERGE queries). This
+// method will check for any existing parameters named $aDataKey and will return a new
+// name with a number for a suffix to ensure its uniqueness.
+func (sqlbldr *Builder) GetUniqueDataKey( aDataKey string ) string {
+	i := 1
+	theDataKey := aDataKey
+	_, bKeyExists := sqlbldr.myParams[theDataKey]
+	for bKeyExists {
+		i += 1
+		theDataKey = aDataKey + strconv.Itoa(i)
+		_, bKeyExists = sqlbldr.myParams[theDataKey]
+	}
+	return theDataKey
+}
+
+// Some operators require alternate handling during WHERE clauses
+// (e.g. "=" with NULLs). This will setParamPrefix(" WHERE ") which will
+// apply to the next AddParam.
+func (sqlbldr *Builder) StartWhereClause() *Builder {
+	sqlbldr.bUseIsNull = true
+	return sqlbldr.SetParamPrefix(" WHERE ")
+}
+
+// Reset WHERE clause flag.
+func (sqlbldr *Builder) EndWhereClause() *Builder {
+	sqlbldr.bUseIsNull = false
+	return sqlbldr
+}
+
+// Adds a string to the SQL prefixed with a space (just in case).
+// *DO NOT* use this method to write values gathered from
+// user input directly into a query. *ALWAYS* use the
+// .AddParam() or similar methods, or pre-sanitize the data
+// value before writing it into the query.
+func (sqlbldr *Builder) Add( aStr string ) *Builder {
+	sqlbldr.mySql += " " + aStr
+	return sqlbldr
+}
+
+// Sets the "glue" string that gets prepended to all subsequent calls to
+// AddParam kinds of methods. Spacing is important here, so add what is needed!
+func (sqlbldr *Builder) SetParamPrefix( aStr string ) *Builder {
+	sqlbldr.myParamPrefix = aStr
+	return sqlbldr
+}
+
+// Operator string to use in all subsequent calls to addParam methods.
+// "=" is default, " LIKE " is a popular operator as well.
+func (sqlbldr *Builder) SetParamOperator( aStr string ) *Builder {
+	// "!=" is not standard SQL, but is a common programmer mistake, cnv to "<>"
+	aStr = strings.Replace(aStr, "!=", OPERATOR_NOT_EQUAL, -1)
+	sqlbldr.myParamOperator = aStr
+	return sqlbldr
+}
+
+// Retrieve the data that will be used for a particular param.
+func (sqlbldr *Builder) getParamValueFromDataSource( aParamKey string ) *Builder {
+	if sqlbldr.myDataSource != nil {
+		if sqlbldr.myDataSource.IsKeyValueAList(aParamKey) {
+			return sqlbldr.SetParamSet(aParamKey, sqlbldr.myDataSource.GetValueListForKey(aParamKey))
+		} else {
+			return sqlbldr.SetNullableParam(aParamKey, sqlbldr.myDataSource.GetValueForKey(aParamKey))
+		}
+	}
+	return sqlbldr
+}
+
+// Set a value for a param when its data value is NULL.
+func (sqlbldr *Builder) SetParamValueIfNull( aParamKey string, aNewValue string ) *Builder {
+	sqlbldr.getParamValueFromDataSource(aParamKey)
+	isSet := sqlbldr.IsParamASet(aParamKey)
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) == 0 {
+		sqlbldr.SetParam(aParamKey, aNewValue)
+	} else if !isSet && sqlbldr.GetParam(aParamKey) == nil {
+		sqlbldr.SetParam(aParamKey, aNewValue)
+	}
+	return sqlbldr
+}
+
+// Set a value for a param when its data value is empty(). e.g. null|""|0
+func (sqlbldr *Builder) SetParamValueIfEmpty( aParamKey string, aNewValue string ) *Builder {
+	sqlbldr.getParamValueFromDataSource(aParamKey)
+	isSet := sqlbldr.IsParamASet(aParamKey)
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) == 0 {
+		sqlbldr.SetParam(aParamKey, aNewValue)
+	} else if val := sqlbldr.GetParam(aParamKey) ; !isSet && (val == nil || *val == "" || *val == "0") {
+		sqlbldr.SetParam(aParamKey, aNewValue)
+	}
+	return sqlbldr
+}
+
+// Mainly used internally by AddParamIfDefined to determine if data param exists.
+func (sqlbldr *Builder) isDataKeyDefined( aDataKey string ) bool {
+	if sqlbldr.myDataSource != nil {
+		return sqlbldr.myDataSource.IsKeyDefined(aDataKey)
+	} else {
+		return false
+	}
+}
+
+// Internal method to affect SQL statment with a param and its value.
+func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
+	isSet := sqlbldr.IsParamASet(aParamKey)
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) > 0 {
+		saveParamOp := sqlbldr.myParamOperator
+		switch strings.TrimSpace(sqlbldr.myParamOperator) {
+		case "=":
+			sqlbldr.myParamOperator = " IN "
+		case OPERATOR_NOT_EQUAL:
+			sqlbldr.myParamOperator = " NOT IN "
+		}//switch
+		sqlbldr.AddParamAsListForColumn(aColName, aParamKey, valSet)
+		sqlbldr.myParamOperator = saveParamOp
+	} else {
+		if val := sqlbldr.GetParam(aParamKey); val != nil || !sqlbldr.bUseIsNull {
+			sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColName) +
+				sqlbldr.myParamOperator + ":" + aParamKey
+		} else {
+			switch strings.TrimSpace(sqlbldr.myParamOperator) {
+			case "=":
+				sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColName) + " IS NULL"
+			case OPERATOR_NOT_EQUAL:
+				sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColName) + " IS NOT NULL"
+			}//switch
+		}
+	}
+}
+
+// Parameter must go into the SQL string regardless of NULL status of data.
+func (sqlbldr *Builder) MustAddParam( aParamKey string, aDefaultValue *string) *Builder {
+	return sqlbldr.MustAddParamForColumn(aParamKey, aParamKey, aDefaultValue)
+}
+
+// Parameter must go into the SQL string regardless of NULL status of data.
+// This is a "shortcut" designed to combine calls to setParamValue, and addParam.
+func (sqlbldr *Builder) MustAddParamForColumn( aParamKey string, aColumnName string, aDefaultValue *string) *Builder {
+	sqlbldr.getParamValueFromDataSource(aParamKey)
+	if aDefaultValue != nil {
+		sqlbldr.SetParamValueIfNull(aParamKey, *aDefaultValue)
+	}
+	sqlbldr.addingParam(aColumnName, aParamKey)
+	return sqlbldr
+}
+
+// Parameter only gets added to the SQL string if data IS NOT NULL.
+func (sqlbldr *Builder) AddParamIfDefined( aParamKey string ) *Builder {
+	if sqlbldr.isDataKeyDefined(aParamKey) {
+		sqlbldr.getParamValueFromDataSource(aParamKey)
+		sqlbldr.addingParam(aParamKey, aParamKey)
+	}
+	return sqlbldr
+}
+
+// Parameter only gets added to the SQL string if data IS NOT NULL.
+func (sqlbldr *Builder) AddParamForColumnIfDefined( aParamKey string, aColumnName string ) *Builder {
+	if sqlbldr.isDataKeyDefined(aParamKey) {
+		sqlbldr.getParamValueFromDataSource(aParamKey)
+		sqlbldr.addingParam(aColumnName, aParamKey)
+	}
+	return sqlbldr
+}
+
+// Adds to the SQL string as a set of values;
+// e.g. "(datakey_1,datakey_2, .. datakey_N)"
+// along with param values set for each of the keys.
+// Honors the ParamPrefix and ParamOperator properties.
+func (sqlbldr *Builder) AddParamAsListForColumn( aColumnName string,
+	aParamKey string, aDataValuesList *[]string ) *Builder {
+	if aDataValuesList != nil && len(*aDataValuesList) > 0 {
+		sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColumnName)
+		sqlbldr.mySql += sqlbldr.myParamOperator + "("
+		i := 1
+		for _, val := range *aDataValuesList {
+			theDataKey := aParamKey + "_" + strconv.Itoa(i)
+			i += 1
+			sqlbldr.mySql += ":" + theDataKey + ","
+			sqlbldr.SetParam(theDataKey, val)
+		}
+		sqlbldr.mySql = strings.TrimRight(sqlbldr.mySql, ",") + ")"
+	}
+	return sqlbldr
+}
+
+// Adds the list of fields (columns) to the SQL string.
+func (sqlbldr *Builder) AddFieldList( aFieldList *[]string ) *Builder {
+	theFieldListStr := sqlbldr.myParamPrefix + "*"
+	if len(*aFieldList) > 0 {
+		theFieldListStr = sqlbldr.myParamPrefix +
+			strings.Join(*aFieldList, ", "+sqlbldr.myParamPrefix)
+	}
+	return sqlbldr.Add(theFieldListStr)
+}
+
+// Return the SQL "LIMIT" expression for our model's database type.
+func (sqlbldr *Builder) AddQueryLimit( aLimit int, aOffset int ) *Builder {
+	if aLimit > 0 && sqlbldr.myDbModel != nil {
+		driverName := sqlbldr.myDbModel.GetDbMeta().Name
+		switch driverName {
+		case MySQL:
+		case PostgreSQL:
+		default:
+			sqlbldr.Add("LIMIT").Add(strconv.Itoa(aLimit))
+			if aOffset > 0 {
+				sqlbldr.Add("OFFSET").Add(strconv.Itoa(aOffset))
+			}
+		}//switch
+	}
+	return sqlbldr
+}
+
+// Sub-query gets added to the SQL string.
+func (sqlbldr *Builder) AddSubQueryForColumn( aSubQuery *Builder, aColumnName string ) *Builder {
+	saveParamOp := sqlbldr.myParamOperator
+	switch strings.TrimSpace(sqlbldr.myParamOperator) {
+	case "=":
+		sqlbldr.myParamOperator = " IN "
+	case OPERATOR_NOT_EQUAL:
+		sqlbldr.myParamOperator = " NOT IN "
+	}//switch
+	sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColumnName) +
+		sqlbldr.myParamOperator + "(" + aSubQuery.mySql + ")"
+	sqlbldr.myParamOperator = saveParamOp
+	//also merge in any params from the sub-query
+	for k, v := range aSubQuery.myParams {
+		sqlbldr.myParams[k] = v
+	}
+	for k, v := range aSubQuery.mySetParams {
+		sqlbldr.mySetParams[k] = v
+	}
+	return sqlbldr
+}
+
+// Apply an externally defined set of WHERE field clauses and param values
+// to our SQL (excludes the "WHERE" keyword).
+func (sqlbldr *Builder) ApplyFilter( aFilter *Builder ) *Builder {
+	if aFilter != nil {
+		if aFilter.mySql != "" {
+			sqlbldr.mySql += sqlbldr.myParamPrefix + aFilter.mySql
+		}
+		//also merge in any params from the sub-query
+		for k, v := range aFilter.myParams {
+			sqlbldr.myParams[k] = v
+		}
+		for k, v := range aFilter.mySetParams {
+			sqlbldr.mySetParams[k] = v
+		}
+	}
+	return sqlbldr
+}
+
+// If sort list is defined and its contents are also contained
+// in the non-empty $aFieldList, then apply the sort order as neccessary.
+// @see ApplyOrderByList() which this method is an alias of.
+func (sqlbldr *Builder) ApplySortList( aSortList *map[string]string ) *Builder {
+	return sqlbldr.ApplyOrderByList(aSortList)
+}
+
+// If order by list is defined, then apply the sort order as neccessary.
+// @param aOrderByList map[string]string - keys are the fields => values are
+//   'ASC' or 'DESC'.
+func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Builder {
+	if aOrderByList != nil && sqlbldr.myDbModel != nil {
+		theSortKeyword := "ORDER BY"
+		/* in case we find diff keywords later...
+		driverName := sqlbldr.myDbModel.GetDbMeta().Name
+		switch driverName {
+		case MySQL:
+		case PostgreSQL:
+		default:
+			theSortKeyword = "ORDER BY"
+		}//switch
+		 */
+		sqlbldr.Add(theSortKeyword)
+
+		theOrderByList := make([]string, len(*aOrderByList))
+		idx := 0
+		for k, v := range *aOrderByList {
+			theEntry := k + " "
+			if strings.ToUpper(strings.TrimSpace(v))==ORDER_BY_DESCENDING {
+				theEntry += ORDER_BY_DESCENDING
+			} else {
+				theEntry += ORDER_BY_ASCENDING
+			}
+			theOrderByList[idx] = theEntry
+		}
+		sqlbldr.Add(strings.Join(theOrderByList, ","))
+	}
+	return sqlbldr
+}
+
+// Replace the currently formed SELECT fields with the param.  If you have nested queries,
+// you will need to use the
+// "SELECT /* FIELDLIST */ field1, field2, (SELECT blah) AS field3 /&#42 /FIELDLIST &#42/ FROM</pre>
+// hints in the SQL.
+func (sqlbldr *Builder) ReplaceSelectFieldsWith( aSelectFields *[]string ) *Builder {
+	if len(*aSelectFields) > 0 {
+		var re *regexp.Regexp
+		//nested queries can mess us up, so check for hints first
+		if strings.Index(sqlbldr.mySql, FIELD_LIST_HINT_START) > 0 &&
+			strings.Index(sqlbldr.mySql, FIELD_LIST_HINT_END) > 0 {
+			re = regexp.MustCompilePOSIX("(?i)SELECT /* FIELDLIST */ .+? /* /FIELDLIST */ FROM")
+		} else {
+			//we want a "non-greedy" match so that it stops at the first "FROM" it finds: ".+?"
+			re = regexp.MustCompilePOSIX("(?i)SELECT .+? FROM")
+		}
+		sqlbldr.mySql = re.ReplaceAllString(sqlbldr.mySql, strings.Join(*aSelectFields, ", "))
+	}
+	return sqlbldr
+}
+
+
+
+
+/*
 
 /**
  * Set the object used for sanitizing SQL to help prevent SQL Injection attacks.
  * @param ISqlSanitizer $aSqlSanitizer - the object used to sanitize field/orderby lists.
  * @return $this Returns $this for chaining.
  * /
-public function setSanitizer( ISqlSanitizer $aSanitizer=null )
+public func (sqlbldr *Builder) setSanitizer( ISqlSanitizer $aSanitizer=null )
 {
-$this->mySqlSanitizer = $aSanitizer;
-return $this;
-}
-
-/**
- * Retrieve the data that will be used for a particular param.
- * @param string $aDataKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param string $aDefaultValue - (OPTIONAL) default value if data is null.
- * @return mixed Returns the data value.
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function getDataValue( $aDataKey, $aDefaultValue=null )
-{
-$theValue = $this->getParamValue($aDataKey);
-if ( is_null($theValue) )
-{ $theValue = $aDefaultValue; }
-return $theValue;
-}
-
-/**
- * Retrieve the data that will be used for a particular param.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param string $aDefaultValue - (optional) default value if data is null.
- * @return mixed Returns the data value.
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function getParamValue( $aParamKey )
-{
-$theData = null;
-if ( isset($this->myDataSet) ) {
-if ( is_array($this->myDataSet) ) {
-if ( isset($this->myDataSet[$aParamKey]) ) {
-$theData = $this->myDataSet[$aParamKey];
-}
-} else if ( is_object($this->myDataSet) ) {
-if ( isset($this->myDataSet->{$aParamKey}) ) {
-$theData = $this->myDataSet->{$aParamKey};
-}
-} else if ( is_string($this->myDataSet) ) {
-$theData = $this->myDataSet;
-}
-}
-//see if there is a data processing function and call it
-if ( isset($this->myParamFuncs[$aParamKey]) ) {
-$theData = $this->myParamFuncs[$aParamKey]($this, $aParamKey, $theData);
-}
-return $theData;
-}
-
-/**
- * Mainly used in cases where param data container may be an unknown type,
- * yet we want to tweak it or set a default value.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param string $aNewValue - new value to use.
- * @return $this Returns $this for chaining.
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function setParamValue( $aParamKey, $aNewValue )
-{
-if ( isset($this->myDataSet) ) {
-if ( is_array($this->myDataSet) ) {
-$this->myDataSet[$aParamKey] = $aNewValue;
-}
-else if ( is_object($this->myDataSet) ) {
-$this->myDataSet->{$aParamKey} = $aNewValue;
-}
-else if ( is_string($this->myDataSet) ) {
-$this->myDataSet = $aNewValue;
-}
-}
-return $this;
-}
-
-/**
- * Set a value for a param when its data value is NULL.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param string $aNewValue - new value to use.
- * @return $this Returns $this for chaining.
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function setParamValueIfNull( $aParamKey, $aNewValue )
-{
-$theDataValue = $this->getParamValue($aParamKey);
-if ( is_null($theDataValue) ) {
-$this->setParamValue($aParamKey, $aNewValue);
-}
-return $this;
-}
-
-/**
- * Set a value for a param when its data value is empty(). e.g. null|""|0
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param string $aNewValue - new value to use.
- * @return $this Returns $this for chaining.
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function setParamValueIfEmpty( $aParamKey, $aNewValue )
-{
-$theDataValue = $this->getParamValue($aParamKey);
-if ( empty($theDataValue) ) {
-//check for empty on new value and ensure NULL if so;
-//  why set an empty value only if current one is empty? to ensure
-//  addParam() will either include the param in the query or not.
-if ( !is_null($aNewValue) && empty($aNewValue) )
-{ $aNewValue = null; }
-$this->setParamValue($aParamKey, $aNewValue);
-}
-return $this;
-}
-
-/**
- * Mainly used internally by addParamIfDefined to determine if data param exists.
- * @param string $aDataKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @return boolean Returns TRUE if data key is defined (or param function exists).
- * @see \BitsTheater\costumes\SqlBuilder::obtainParamsFrom()
- * /
-public function isDataKeyDefined( $aDataKey )
-{
-//see if there is a data processing function
-$bResult = ( isset($this->myParamFuncs[$aDataKey]) );
-if ( !$bResult && isset($this->myDataSet) ) {
-if ( is_array($this->myDataSet) ) {
-$bResult = array_key_exists($aDataKey, $this->myDataSet);
-} else if ( is_object($this->myDataSet) ) {
-$bResult = property_exists($this->myDataSet, $aDataKey);
-} else if ( is_string($this->myDataSet) ) {
-$bResult = true;
-}
-}
-return $bResult;
-}
-
-/**
- * Resets the object so it can be resused with same dataset.
- * @param boolean $bClearDataFunctionsToo - (optional) clear data processing
- *   functions as well (default is FALSE).
- * @return $this Returns $this for chaining.
- * /
-public function reset( $bClearDataFunctionsToo=false )
-{
-$this->myParamPrefix = ' ';
-$this->myParamOperator = '=';
-$this->myParamType = \PDO::PARAM_STR;
-$this->mySql = '';
-$this->myParams = array();
-$this->myParamTypes = array();
-if ( $bClearDataFunctionsToo )
-{ $this->myParamFuncs = array(); }
-return $this;
-}
-
-/**
- * Sets the param value and param type, but does not affect the SQL string.
- * @param string $aParamKey - the field/param name.
- * @param mixed $aParamValue - the param value to use.
- * @param number $aParamType - (OPTIONAL) \PDO::PARAM_* integer constant.
- * @return $this Returns $this for chaining.
- * /
-public function setParam( $aParamKey, $aParamValue, $aParamType=null )
-{
-if ( isset($aParamValue) ) {
-$this->myParams[$aParamKey] = $aParamValue;
-if ( isset($aParamType) ) {
-$this->myParamTypes[$aParamKey] = $aParamType;
-} else if ( !isset($this->myParamTypes[$aParamKey]) ) {
-$this->myParamTypes[$aParamKey] = $this->myParamType;
-}
-} else {
-$this->myParams[$aParamKey] = null;
-$this->myParamTypes[$aParamKey] = \PDO::PARAM_NULL;
-}
-return $this;
-}
-
-/**
- * Gets the current value of a param that has been added.
- * @param string $aParamKey - the param key to retrieve.
- * @return mixed Returns the data.
- * /
-public function getParam( $aParamKey )
-{
-if ( isset($this->myParams[$aParamKey]) )
-{ return $this->myParams[$aParamKey]; }
-}
-
-/**
- * Sets the SQL string to this value.
- * @param string $aSql - the first part of a SQL string to build upon.
- * @return $this Returns $this for chaining.
- * /
-public function startWith( $aSql )
-{
-$this->mySql = $aSql;
-return $this;
-}
-
-/**
- * Adds the fieldlist to the SQL string.
- * @param array|string $aFieldList - the list or comma string of fieldnames.
- * @return $this Returns $this for chaining.
- * /
-public function addFieldList( $aFieldList )
-{
-$theFieldList = '*' ;
-if( !empty($aFieldList) )
-{
-if( is_array($aFieldList) )
-{
-if( !empty($this->myParamPrefix) )
-{ // ensure prefixes are applied
-$thePrefixedFieldList = array() ;
-foreach( $aFieldList as $aField )
-{
-if( strpos( $aField, $this->myParamPrefix ) !== 0 )
-$thePrefixedFieldList[] =
-$this->myParamPrefix . $aField ;
-else
-$thePrefixedFieldList[] = $aField ;
-}
-$theFieldList = implode( ', ', $thePrefixedFieldList ) ;
-}
-else
-$theFieldList = implode( ', ', $aFieldList ) ;
-}
-else if( is_string($aFieldList) )
-{ // add it as-is; let the caller beware
-$theFieldList = $aFieldList ;
-}
-}
-else if( !empty( $this->myParamPrefix ) )
-{
-$theFieldList = $this->myParamPrefix . '*' ;
-}
-return $this->add($theFieldList) ;
-}
-
-/**
- * Adds to the SQL string as a set of values;
- * e.g. "(datakey_1,datakey_2, .. datakey_N)"
- * along with param values set for each of the keys.
- * Honors the ParamPrefix and ParamOperator properties.
- * @param string $aColumnName - the table column (aka field) name.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method;
- *   NOTE: $aDataKeys will have _$i from 1..count() appended.
- * @param array $aDataValuesList - the value list to use as param values.
- * @param number $aParamType - (OPTIONAL) \PDO::PARAM_* integer constant
- *   to use instead of relying on the current param type setting.
- * @return $this Returns $this for chaining.
- * /
-public function addParamAsListForColumn($aColumnName, $aParamKey,
-$aDataValuesList, $aParamType=null)
-{
-if ( is_array($aDataValuesList) && !empty($aDataValuesList) ) {
-$this->mySql .= $this->myParamPrefix;
-$this->mySql .= $this->identifier_delimiter . $aColumnName . $this->identifier_delimiter;
-$this->mySql .= $this->myParamOperator.'(';
-$i = 1;
-foreach ( $aDataValuesList as $theDataValue ) {
-$theDataKey = $aParamKey . '_' . $i++;
-$this->mySql .= ':' . $theDataKey . ',';
-$this->setParam($theDataKey, $theDataValue, $aParamType);
-}
-$this->mySql = rtrim($this->mySql, ',') . ')';
-}
-return $this;
-}
-
-/**
- * Internal method to affect SQL statment with a param and its value.
- * @param string $aFieldName - the field name.
- * @param string $aParamKey - the param name.
- * @param mixed $aParamValue - the param value to use.
- * @param number $aParamType - (OPTIONAL) \PDO::PARAM_* integer constant
- *   to use instead of relying on the current param type setting.
- * /
-protected function addingParam( $aFieldName, $aParamKey, $aParamValue,
-$aParamType=null )
-{
-if ( is_array($aParamValue) && !empty($aParamValue) ) {
-$saveParamOp = $this->myParamOperator;
-switch ( trim($this->myParamOperator) ) {
-case '=':
-$this->myParamOperator = ' IN ';
-break;
-case self::OPERATOR_NOT_EQUAL:
-$this->myParamOperator = ' NOT IN ';
-break;
-}//switch
-$this->addParamAsListForColumn($aFieldName, $aParamKey, $aParamValue, $aParamType);
-$this->myParamOperator = $saveParamOp;
-}
-else {
-if ( is_array($aParamValue) && empty($aParamValue) ) {
-$aParamValue = null;
-}
-if ( !is_null($aParamValue) || !$this->bUseIsNull ) {
-$this->mySql .= $this->myParamPrefix .
-$this->identifier_delimiter . $aFieldName . $this->identifier_delimiter .
-$this->myParamOperator . ':' . $aParamKey ;
-$this->setParam($aParamKey, $aParamValue, $aParamType);
-} else {
-switch ( trim($this->myParamOperator) ) {
-case '=':
-$this->mySql .= $this->myParamPrefix .
-$this->identifier_delimiter . $aFieldName . $this->identifier_delimiter .
-' IS NULL' ;
-break;
-case self::OPERATOR_NOT_EQUAL:
-$this->mySql .= $this->myParamPrefix .
-$this->identifier_delimiter . $aFieldName . $this->identifier_delimiter .
-' IS NOT NULL' ;
-break;
-}//switch
-}
-}
-}
-
-/**
- * Parameter must go into the SQL string regardless of NULL status of data.
- * @param string $aFieldName - field name to use.
- * @param string $aDataKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param mixed $aDefaultValue - (optional) default value if data is null.
- * @param number $aParamType - (optional) PDO::PARAM_* integer constant (STR is default).
- * @return $this Returns $this for chaining.
- * @deprecated use mustAddParamForColumn() instead.
- * /
-public function mustAddFieldAndParam($aFieldName, $aDataKey,
-$aDefaultValue=null, $aParamType=\PDO::PARAM_STR)
-{
-$theData = $this->getDataValue($aDataKey, $aDefaultValue);
-$this->addingParam($aFieldName, $aDataKey, $theData, $aParamType);
-return $this;
-}
-
-/**
- * Parameter must go into the SQL string regardless of NULL status of data.
- * This is a "shortcut" method designed to combine calls to setParamType(),
- * setParamValueIfNull(), and addParam().
- * @param string $aParamKey - the param key used to get its data.
- * @param mixed $aDefaultValue - (OPTIONAL) default value if data is null.
- * @param number $aParamType - (OPTIONAL) PDO::PARAM_* integer constant (STR is default).
- * @return $this Returns $this for chaining.
- * /
-public function mustAddParam( $aParamKey, $aDefaultValue=null, $aParamType=null )
-{
-$theData = $this->getDataValue($aParamKey, $aDefaultValue);
-$this->addingParam($aParamKey, $aParamKey, $theData, $aParamType);
-return $this;
-}
-
-/**
- * Parameter must go into the SQL string regardless of NULL status of data.
- * This is a "shortcut" method designed to combine calls to setParamType,
- * setParamValue, and addParam.
- * @param string $aParamKey - the param key used to get its data.
- * @param string $aColumnName - the table column (aka field) name.
- * @param mixed $aDefaultValue - (OPTIONAL) default value if data is null.
- * @param number $aParamType - (OPTIONAL) \PDO::PARAM_* integer constant
- *   to use instead of relying on the current param type setting.
- * @return $this Returns $this for chaining.
- * /
-public function mustAddParamForColumn( $aParamKey, $aColumnName,
-$aDefaultValue=null, $aParamType=null )
-{
-$theData = $this->getDataValue($aParamKey, $aDefaultValue);
-$this->addingParam($aColumnName, $aParamKey, $theData, $aParamType);
-return $this;
-}
-
-/**
- * Parameter only gets added to the SQL string if data IS NOT NULL.
- * @param string $aParamKey - the param key used to get its data.
- * @return $this Returns $this for chaining.
-
- * /
-public function addParam( $aParamKey )
-{
-$theData = $this->getParamValue($aParamKey);
-if ( isset($theData) ) {
-$this->addingParam($aParamKey, $aParamKey, $theData);
-}
-return $this;
-}
-
-/**
- * Parameter only gets added to the SQL string if data IS NOT NULL.
- * @param string $aParamKey - the param key used to get its data.
- * @param string $aColumnName - the table column (aka field) name.
- * @return $this Returns $this for chaining.
-
- * /
-public function addParamForColumn( $aParamKey, $aColumnName )
-{
-$theData = $this->getParamValue($aParamKey);
-if ( isset($theData) ) {
-$this->addingParam($aColumnName, $aParamKey, $theData);
-}
-return $this;
-}
-
-/**
- * Rather than rely on the current param type settings, apply the given
- * param type for this particular param being added.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param number $aParamType - \PDO::PARAM_* integer constant to use
- *   instead of relying on the current param type setting.
- * /
-public function addParamOfType($aParamKey, $aParamType)
-{
-$theData = $this->getParamValue($aParamKey);
-if ( isset($theData) ) {
-$this->addingParam($aParamKey, $aParamKey, $theData, $aParamType);
-}
-return $this;
-}
-
-/**
- * Parameter gets added to the SQL string if data key exists in data set,
- * EVEN IF THE DATA IS NULL.
- * @param string $aParamKey - array key or property name used to retrieve
- *   data set by the obtainParamsFrom() method.
- * @param number $aParamType - (OPTIONAL) \PDO::PARAM_* integer constant
- *   to use instead of relying on the current param type setting.
- * @param $aParamTypeDeprecated - (IGNORE) defined for backward
- *   compatibility only!
- * @return $this Returns $this for chaining.
- * /
-public function addParamIfDefined($aParamKey, $aParamType=null,
-$aParamTypeDeprecated=null)
-{
-if ( $this->isDataKeyDefined($aParamKey) ) {
-$theData = $this->getParamValue($aParamKey);
-//2nd param was always ignored anyway, if older code specified a 3rd param,
-//  just make it our 2nd param instead.
-if ( !is_null($aParamTypeDeprecated) )
-$aParamType = $aParamTypeDeprecated;
-$this->addingParam($aParamKey, $aParamKey, $theData, $aParamType);
-}
-return $this;
-}
-
-/**
- * Parameter gets added to the SQL string if data key exists in data set.
- * @param string $aParamKey - the param key used to get its data.
- * @param string $aColumnName - the table column (aka field) name.
- * @return $this Returns $this for chaining.
- * /
-public function addParamIfDefinedForColumn($aParamKey, $aColumnName)
-{
-if ( $this->isDataKeyDefined($aParamKey) ) {
-$theData = $this->getParamValue($aParamKey);
-$this->addingParam($aColumnName, $aParamKey, $theData);
-}
-return $this;
-}
-
-/**
- * Sets the "glue" string that gets prepended to all subsequent calls
- * to addParam kinds of methods. Spacing is important here, so add what
- * is needed!
- * @param string $aStr - glue to prepend.
- * @return $this Returns $this for chaining.
- * /
-public function setParamPrefix( $aStr=', ' )
-{
-$this->myParamPrefix = $aStr;
-return $this;
-}
-
-/**
- * Operator string to use in all subsequent calls to addParam methods.
- * @param string $aStr - operator string to use ('=' is default,
- *   ' LIKE ' is a popular operator as well).
- * @return $this Returns $this for chaining.
- * /
-public function setParamOperator( $aStr='=' )
-{
-if ( strpos($aStr, '!=') !== false )
-{ $aStr = str_replace('!=', self::OPERATOR_NOT_EQUAL, $aStr); }
-$this->myParamOperator = $aStr;
-return $this;
-}
-
-/**
- * Parameter type to use in all subsequent calls to addParam methods.
- * @param number $aParamType - \PDO::PARAM_* integer constant.
- * @return $this Returns $this for chaining.
- * /
-public function setParamType( $aParamType )
-{
-$this->myParamType = $aParamType;
-return $this;
-}
-
-/**
- * Adds a string to the SQL prefixed with a space (just in case).
- *
- * <b><i><u>DO NOT</u></i></b> use this method to write values gathered from
- * user input directly into a query. <b><i><u>ALWAYS</u></i></b> use the
- * <code>addParam()</code> or similar methods, or pre-sanitize the data
- * value before writing it into the query.
- *
- * @param string $aStr - patial SQL sting to add.
- * @return $this Returns $this for chaining.
- * /
-public function add( $aStr )
-{
-$this->mySql .= ' ' . $aStr;
-return $this;
-}
-
-/**
- * Adds a string to the SQL, prefixed with a space, and wrapped in
- * single-quotes, representing a literal string in an SQL statement.
- *
- * <b><i><u>DO NOT</u></i></b> use this method to write values gathered from
- * user input directly into a query. <b><i><u>ALWAYS</u></i></b> use the
- * <code>addParam()</code> or similar methods, or pre-sanitize the data
- * value before writing it into the query.
- *
- * @param string $aStr the string to be wrapped and appended
- * @param boolean $bAndAComma (optional:false) also append a comma and an
- *  additional space. Useful for composing lists.
- * @return $this Returns $this for chaining.
- * @since BitsTheater v4.1.0
- * /
-public function addQuoted( $aStr, $bAndAComma=false )
-{
-$this->mySql .= ' \'' . $aStr . ( $bAndAComma ? '\', ' : '\'' ) ;
-return $this ;
-}
-
-/**
- * Sometimes parameter data needs processing before being used.
- * @param string $aParamKey - the parameter key.
- * @param callable $aParamFunc - a function used to process the
- *   data (even a default value) of the form:<br>
- *   func($thisSqlBuilder, $paramKey, $currentParamValue) and returns
- *   the processed value.
- * @return $this Returns $this for chaining.
- * /
-public function setParamDataHandler( $aParamKey, $aParamFunc )
-{
-if ( !empty($aParamKey) ) {
-$this->myParamFuncs[$aParamKey] = $aParamFunc;
-}
-return $this;
-}
-
-/**
- * Sub-query gets added to the SQL string.
- * @param SqlBuilder $aSubQuery - the sub-query object to copy the SQL
- *   string from and insert as "("+SubQuery->SQL+")".
- * @param string $aColumnName - the table column (aka field) name.
- * @param boolean $bExpectMultipleResults - (OPTIONAL) whether to expect
- *   an array of results or just a single one. Default is TRUE.
- * @return $this Returns $this for chaining.
- * /
-public function addSubQueryForColumn( SqlBuilder $aSubQuery, $aColumnName,
-$bExpectMultipleResults=true )
-{
-$saveParamOp = $this->myParamOperator;
-if ( $bExpectMultipleResults ) {
-switch ( trim($this->myParamOperator) ) {
-case '=':
-$this->myParamOperator = ' IN ';
-break;
-case self::OPERATOR_NOT_EQUAL:
-$this->myParamOperator = ' NOT IN ';
-break;
-}//switch
-}
-$this->mySql .= $this->myParamPrefix .
-$this->identifier_delimiter . $aColumnName . $this->identifier_delimiter .
-$this->myParamOperator . '(' . $aSubQuery->mySql . ')' ;
-$this->myParamOperator = $saveParamOp;
-//also merge in any params and param types from the sub-query
-$this->myParams = array_merge($this->myParams, $aSubQuery->myParams);
-$this->myParamTypes = array_merge($this->myParamTypes, $aSubQuery->myParamTypes);
-return $this;
-}
-
-/**
- * Apply an externally defined set of WHERE field clauses and param values
- * to our SQL (excludes the "WHERE" keyword).
- * @param SqlBuilder $aFilter - External SqlBuilder object (can be NULL).
- * @return $this Returns $this for chaining.
- * /
-public function applyFilter( SqlBuilder $aFilter=null )
-{
-if ( !empty($aFilter) ) {
-if ( !empty($aFilter->mySql) ) {
-$this->mySql .= $this->myParamPrefix.$aFilter->mySql;
-}
-if ( !empty($aFilter->myParams) ) {
-foreach ($aFilter->myParams as $theFilterParamKey => $theFilterParamValue) {
-$this->setParam( $theFilterParamKey, $theFilterParamValue,
-$aFilter->myParamTypes[$theFilterParamKey]
-);
-}
-}
-}
-return $this;
-}
-
-/**
- * If sort list is defined and its contents are also contained
- * in the non-empty $aFieldList, then apply the sort order as neccessary.
- * @see \BitsTheater\costumes\SqlBuilder::applyOrderByList() which this method is an alias of.
- * @param array $aSortList - keys are the fields => values are
- *   'ASC'|true or 'DESC'|false with null='ASC'.
- * @param string|string[] $aFieldList - the list or comma string of fieldnames.
- * @return $this Returns $this for chaining.
- * /
-public function applySortList( $aSortList, $aFieldList=null )
-{ return $this->applyOrderByList($aSortList, $aFieldList); }
-
-/**
- * If order by list is defined, then apply the sort order as neccessary.
- * @param array $aOrderByList - keys are the fields => values are
- *   'ASC'|true or 'DESC'|false with null='ASC'.
- * @return $this Returns $this for chaining.
- * /
-public function applyOrderByList( $aOrderByList )
-{
-if ( !empty($aOrderByList) ) {
-$theSortKeyword = 'ORDER BY';
-//other db types may use a diff reserved keyword, set that here
-//TODO ...
-$this->add($theSortKeyword);
-
-$theOrderByList = $aOrderByList;
-//if plain string[] implying all ASC order, skip processing step
-if ( !isset($theOrderByList[0]) ) {
-$theOrderByList = array();
-foreach ($aOrderByList as $theField => $theSortOrder) {
-$theEntry = $theField . ' ';
-if ( is_bool($theSortOrder) )
-$theEntry .= ($theSortOrder) ? self::ORDER_BY_ASCENDING : self::ORDER_BY_DESCENDING;
-else if ( strtoupper(trim($theSortOrder))==self::ORDER_BY_DESCENDING )
-$theEntry .= self::ORDER_BY_DESCENDING;
-else
-$theEntry .= self::ORDER_BY_ASCENDING;
-$theOrderByList[] = $theEntry;
-}
-}
-$this->add(implode(',', $theOrderByList));
-}
-return $this;
+sqlbldr.mySqlSanitizer = $aSanitizer;
+return sqlbldr
 }
 
 /**
  * Retrieve the order by list from the sanitizer which might be from the UI or a default.
  * @return $this Returns $this for chaining.
  * /
-public function applyOrderByListFromSanitizer()
+public func (sqlbldr *Builder) applyOrderByListFromSanitizer()
 {
-if ( !empty($this->mySqlSanitizer) )
-return $this->applyOrderByList( $this->mySqlSanitizer->getSanitizedOrderByList() ) ;
+if ( !empty(sqlbldr.mySqlSanitizer) )
+return sqlbldr.applyOrderByList( sqlbldr.mySqlSanitizer->getSanitizedOrderByList() ) ;
 else
-return $this;
-}
-
-/**
- * Some operators require alternate handling during WHERE clauses
- * (e.g. "=" with NULLs). This will setParamPrefix(" WHERE ") which will
- * apply to the next addParam.
- * @param string $aAdditionalParamPrefix - string to append to " WHERE "
- *   as the next param prefix.
- * @return $this Returns $this for chaining.
- * /
-public function startWhereClause( $aAdditionalParamPrefix='' )
-{
-$this->bUseIsNull = true;
-return $this->setParamPrefix(' WHERE '.$aAdditionalParamPrefix);
-}
-
-/**
- * Some operators require alternate handling during WHERE clauses (e.g. "=" with NULLs).
- * @return $this Returns $this for chaining.
- * /
-public function endWhereClause()
-{
-$this->bUseIsNull = false;
-return $this;
-}
-
-/**
- * Some operators require alternate handling during WHERE clauses
- * (e.g. "=" with NULLs). Similar to startWhereClause(), this method is
- * specific to building a filter object that consists entirely of a
- * partial WHERE clause which will get appended to the main SqlBuilder
- * object using applyFilter().
- * @param string $aAdditionalParamPrefix - (OPTIONAL) string to set as the
- *   inital value for setParamPrefix(). Defaults to " AND ".
- * @return $this Returns $this for chaining.
- * /
-public function startFilter( $aSetParamPrefix=' AND ' )
-{
-$this->bUseIsNull = true;
-$this->startWith('1');
-return $this->setParamPrefix($aSetParamPrefix);
+return sqlbldr
 }
 
 //=================================================================
-// MAPPED FUNCTIONS TO MODEL
+// MAPPED func (sqlbldr *Builder)S TO MODEL
 //=================================================================
 
 /**
@@ -869,8 +561,8 @@ return $this->setParamPrefix($aSetParamPrefix);
  *   the PDOStatement.
  * @see \BitsTheater\Model::execDML();
  * /
-public function execDML() {
-return $this->myModel->execDML($this->mySql, $this->myParams, $this->myParamTypes);
+public func (sqlbldr *Builder) execDML() {
+return sqlbldr.myModel->execDML(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
 }
 
 /**
@@ -882,8 +574,8 @@ return $this->myModel->execDML($this->mySql, $this->myParams, $this->myParamType
  * @return boolean Returns the result of the SQLSTATE check.
  * @link https://ib-aid.com/download/docs/firebird-language-reference-2.5/fblangref25-appx02-sqlstates.html
  * /
-public function execDMLandCheck($aSqlState5digitCodes=array(self::SQLSTATE_NO_DATA)) {
-$theExecResult = $this->execDML();
+public func (sqlbldr *Builder) execDMLandCheck($aSqlState5digitCodes=array(self::SQLSTATE_NO_DATA)) {
+$theExecResult = sqlbldr.execDML();
 if (!empty($aSqlState5digitCodes)) {
 $theStatesToCheck = null;
 if (is_string($aSqlState5digitCodes)) {
@@ -909,8 +601,8 @@ return !empty($theExecResult);
  * @link https://dev.mysql.com/doc/refman/5.6/en/error-messages-server.html
  * @link https://ib-aid.com/download/docs/firebird-language-reference-2.5/fblangref25-appx02-sqlstates.html
  * /
-public function execDMLandCheckCode($aSqlState5digitCode=self::SQLSTATE_NO_DATA) {
-return ($this->execDML()->errorCode()==$aSqlState5digitCode);
+public func (sqlbldr *Builder) execDMLandCheckCode($aSqlState5digitCode=self::SQLSTATE_NO_DATA) {
+return (sqlbldr.execDML()->errorCode()==$aSqlState5digitCode);
 }
 
 /**
@@ -919,16 +611,16 @@ return ($this->execDML()->errorCode()==$aSqlState5digitCode);
  * @return \PDOStatement on success.
  * @see \BitsTheater\Model::query();
  * /
-public function query() {
-return $this->myModel->query($this->mySql, $this->myParams, $this->myParamTypes);
+public func (sqlbldr *Builder) query() {
+return sqlbldr.myModel->query(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
 }
 
 /**
  * A combination query & fetch a single row, returns null if errored.
  * @see \BitsTheater\Model::getTheRow();
  * /
-public function getTheRow() {
-return $this->myModel->getTheRow($this->mySql, $this->myParams, $this->myParamTypes);
+public func (sqlbldr *Builder) getTheRow() {
+return sqlbldr.myModel->getTheRow(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
 }
 
 /**
@@ -937,8 +629,8 @@ return $this->myModel->getTheRow($this->mySql, $this->myParams, $this->myParamTy
  * @throws DbException if there is an error.
  * @see \BitsTheater\Model::execMultiDML();
  * /
-public function execMultiDML($aListOfParamValues) {
-return $this->myModel->execMultiDML($this->mySql, $aListOfParamValues, $this->myParamTypes);
+public func (sqlbldr *Builder) execMultiDML($aListOfParamValues) {
+return sqlbldr.myModel->execMultiDML(sqlbldr.mySql, $aListOfParamValues, sqlbldr.myParamTypes);
 }
 
 /**
@@ -948,8 +640,8 @@ return $this->myModel->execMultiDML($this->mySql, $aListOfParamValues, $this->my
  * @return int Returns the lastInsertId().
  * @see \BitsTheater\Model::addAndGetId();
  * /
-public function addAndGetId() {
-return $this->myModel->addAndGetId($this->mySql, $this->myParams, $this->myParamTypes);
+public func (sqlbldr *Builder) addAndGetId() {
+return sqlbldr.myModel->addAndGetId(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
 }
 
 /**
@@ -960,10 +652,10 @@ return $this->myModel->addAndGetId($this->mySql, $this->myParams, $this->myParam
  * @return string[] Returns the param data.
  * @see \PDOStatement::execute();
  * /
-public function execDMLandGetParams()
+public func (sqlbldr *Builder) execDMLandGetParams()
 {
-$this->myModel->execDML($this->mySql, $this->myParams, $this->myParamTypes);
-return $this->myParams;
+sqlbldr.myModel->execDML(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
+return sqlbldr.myParams;
 }
 
 /**
@@ -971,13 +663,13 @@ return $this->myParams;
  * @param array $aSqlAggragates - (optional) the aggregation list, defaults to array('count(*)'=>'total_rows').
  * @return array Returns the results of the aggregates.
  * /
-public function getQueryTotals( $aSqlAggragates=array('count(*)'=>'total_rows') )
+public func (sqlbldr *Builder) getQueryTotals( $aSqlAggragates=array('count(*)'=>'total_rows') )
 {
 $theSqlFields = array();
 foreach ($aSqlAggragates as $theField => $theName)
 array_push($theSqlFields, $theField . ' AS ' . $theName);
 $theSelectFields = implode(', ', $theSqlFields);
-$sqlTotals = $this->cloneFrom($this);
+$sqlTotals = sqlbldr.cloneFrom($this);
 try {
 return $sqlTotals->replaceSelectFieldsWith($theSelectFields)
 ->getAggregateResults(array_values($aSqlAggragates))
@@ -987,64 +679,15 @@ return $sqlTotals->replaceSelectFieldsWith($theSelectFields)
 }
 
 /**
- * Create a clone of the object param and return it.
- * @param SqlBuilder $aSqlBuilder - the builder to clone.
- * @return SqlBuilder Returns the cloned builder.
- * /
-public function cloneFrom(SqlBuilder $aSqlBuilder)
-{
-return clone $aSqlBuilder;
-}
-
-/**
- * Replace the currently formed SELECT fields with the param.  If you have nested queries,
- * you will need to use the
- * <pre>SELECT /&#42 FIELDLIST &#42/ field1, field2, (SELECT blah) AS field3 /&#42 /FIELDLIST &#42/ FROM</pre>
- * hints in the SQL.
- * @param string|array $aSelectFields - (optional) the fields to use instead, defaults to "*".
- * @return SqlBuilder Returns $this for chaining.
- * /
-public function replaceSelectFieldsWith($aSelectFields=null)
-{
-$theSelectFields = null;
-if (is_string($aSelectFields))
-$theSelectFields = $aSelectFields;
-if (is_array($aSelectFields))
-$theSelectFields = implode(',', $aSelectFields);
-if (empty($theSelectFields))
-$theSelectFields = '*';
-$theSelectFields = 'SELECT '.$theSelectFields.' FROM';
-//nested queries can mess us up, so check for hints first
-if (strpos($this->mySql, self::FIELD_LIST_HINT_START)>0 &&
-strpos($this->mySql, self::FIELD_LIST_HINT_END)>0)
-{
-
- */
-//$this->mySql = preg_replace('|SELECT /\* FIELDLIST \*/ .+? /\* /FIELDLIST \*/ FROM|i',
-/*
-$theSelectFields, $this->mySql, 1
- * /
-);
-}
-else
-{
-//we want a "non-greedy" match so that it stops at the first "FROM" it finds: ".+?"
-$this->mySql = preg_replace('|SELECT .+? FROM|i', $theSelectFields, $this->mySql, 1);
-}
-//$this->debugLog(__METHOD__.' sql='.$theSql->mySql.' params='.$this->debugStr($theSql->myParams));
-return $this;
-}
-
-/**
  * Execute the currently built SELECT query and retrieve all the aggregates as numbers.
  * @param string[] $aSqlAggragateNames - the aggregate names to retrieve.
  * @return number[] Returns the array of aggregate values.
  * /
-public function getAggregateResults( $aSqlAggragateNames=array('total_rows') )
+public func (sqlbldr *Builder) getAggregateResults( $aSqlAggragateNames=array('total_rows') )
 {
 $theResults = array();
-//$this->debugLog(__METHOD__.' sql='.$theSql->mySql.' params='.$this->debugStr($theSql->myParams));
-$theRow = $this->getTheRow();
+//sqlbldr.debugLog(__METHOD__.' sql='.$theSql->mySql.' params='.sqlbldr.debugStr($theSql->myParams));
+$theRow = sqlbldr.getTheRow();
 if (!empty($theRow)) {
 foreach ($aSqlAggragateNames as $theName)
 {
@@ -1061,29 +704,18 @@ return $theResults;
  * @param string|object $aMsgOrException - error message or Exception object.
  * @return SqlBuilder Returns $this for chaining.
  * /
-public function logSqlFailure($aWhatFailed, $aMsgOrException) {
+public func (sqlbldr *Builder) logSqlFailure($aWhatFailed, $aMsgOrException) {
 $theMsg = (is_object($aMsgOrException) && method_exists($aMsgOrException, 'getMessage'))
 ? $aMsgOrException->getMessage()
 : $aMsgOrException
 ;
-$this->errorLog($aWhatFailed . ' [1/3] failed: ' . $theMsg);
-$this->errorLog($aWhatFailed . ' [2/3] sql=' . $this->mySql);
-$this->errorLog($aWhatFailed . ' [3/3] params=' . $this->debugStr($this->myParams));
-if ( $this->getDirector()->isDebugging() &&
+sqlbldr.errorLog($aWhatFailed . ' [1/3] failed: ' . $theMsg);
+sqlbldr.errorLog($aWhatFailed . ' [2/3] sql=' . sqlbldr.mySql);
+sqlbldr.errorLog($aWhatFailed . ' [3/3] params=' . sqlbldr.debugStr(sqlbldr.myParams));
+if ( sqlbldr.getDirector()->isDebugging() &&
 is_callable(array($aMsgOrException, 'getTraceAsString')) )
-{ $this->errorLog( $aMsgOrException->getTraceAsString() ); }
-return $this;
-}
-
-/**
- * Create the DbException object and log the SQL failure.
- * @param string $aWhatFailed - the thing that failed, typically __METHOD__.
- * @param \PDOException $aPdoException - the PDOException that occurred.
- * @return DbException Return the new exception object.
- * /
-public function newDbException($aWhatFailed, $aPdoException) {
-$this->logSqlFailure($aWhatFailed, $aPdoException);
-return new DbException($aPdoException, $aWhatFailed . ' failed.');
+{ sqlbldr.errorLog( $aMsgOrException->getTraceAsString() ); }
+return sqlbldr
 }
 
 /**
@@ -1093,42 +725,10 @@ return new DbException($aPdoException, $aWhatFailed . ' failed.');
  * @param string $aMsg - (optional) debug message.
  * @return SqlBuilder Returns $this for chaining.
  * /
-public function logSqlDebug($aWhatMethod, $aMsg = '') {
-$this->debugLog($aWhatMethod . ' [1/2] ' . $aMsg . ' sql=' . $this->mySql);
-$this->debugLog($aWhatMethod . ' [2/2] params=' . $this->debugStr($this->myParams));
-return $this;
-}
-
-/**
- * PDO requires all query parameters be unique. This poses an issue when multiple datakeys
- * with the same name are needed in the query (especially true for MERGE queries). This
- * method will check for any existing parameters named $aDataKey and will return a new
- * name with a number for a suffix to ensure its uniqueness.
- * @param string $aDataKey - the parameter/datakey name.
- * @return string Return the $aDataKey if already unique, else a modified version to
- *   ensure it is unique in the query-so-far.
- * /
-public function getUniqueDataKey($aDataKey) {
-$i = 1;
-$theDataKey = $aDataKey;
-while (array_key_exists($theDataKey, $this->myParams))
-$theDataKey = $aDataKey . strval(++$i);
-return $theDataKey;
-}
-
-/**
- * Quoted identifiers are DB vendor specific so providing a helper method to just
- * return a properly quoted string for MySQL vs MSSQL vs Oracle, etc. is handy.
- * @param string $aIdentifier - the string to quote.
- * @return string Returns the string properly quoted for the database connection in use.
- * /
-public function getQuoted( $aIdentifier )
-{
-return $this->identifier_delimiter
-. str_replace($this->identifier_delimiter,
-str_repeat($this->identifier_delimiter, 2), $aIdentifier)
-. $this->identifier_delimiter
-;
+public func (sqlbldr *Builder) logSqlDebug($aWhatMethod, $aMsg = '') {
+sqlbldr.debugLog($aWhatMethod . ' [1/2] ' . $aMsg . ' sql=' . sqlbldr.mySql);
+sqlbldr.debugLog($aWhatMethod . ' [2/2] params=' . sqlbldr.debugStr(sqlbldr.myParams));
+return sqlbldr
 }
 
 /**
@@ -1147,7 +747,7 @@ str_repeat($this->identifier_delimiter, 2), $aIdentifier)
  * @return array Returns the sanitized OrderBy list.
  * @deprecated Please use SqlBuilder::applyOrderByListFromSanitizer()
  * /
-public function sanitizeOrderByList($aScene, $aDefaultOrderByList=null)
+public func (sqlbldr *Builder) sanitizeOrderByList($aScene, $aDefaultOrderByList=null)
 {
 $theOrderByList = $aDefaultOrderByList;
 if (!empty($aScene) && !empty($aScene->orderby))
@@ -1175,52 +775,6 @@ return $theOrderByList;
 }
 
 /**
- * If we are not already in a transaction, start one.
- * @return $this Returns $this for chaining.
- * /
-public function beginTransaction()
-{
-if ( $this->myTransactionFlag<1 ) {
-if ( !$this->myModel->db->inTransaction() ) {
-$this->myModel->db->beginTransaction();
-$this->myTransactionFlag += 1;
-}
-}
-else {
-$this->myTransactionFlag += 1;
-}
-return $this;
-}
-
-/**
- * If we started a transaction earlier, commit it.
- * @return $this Returns $this for chaining.
- * /
-public function commitTransaction()
-{
-if ( $this->myTransactionFlag>0 ) {
-if ( --$this->myTransactionFlag == 0 ) {
-$this->myModel->db->commit();
-}
-}
-return $this;
-}
-
-/**
- * If we started a transaction earlier, roll it back.
- * @return $this Returns $this for chaining.
- * /
-public function rollbackTransaction()
-{
-if ( $this->myTransactionFlag>0 ) {
-if ( --$this->myTransactionFlag == 0 ) {
-$this->myModel->db->rollBack();
-}
-}
-return $this;
-}
-
-/**
  * If the Sanitizer is using a pager and limiting the query, try to
  * retrieve the overall query total so we can display "page 1 of 20"
  * or equivalent text/widget.<br>
@@ -1229,18 +783,18 @@ return $this;
  * string.
  * @return $this Returns $this for chaining.
  * /
-public function retrieveQueryTotalsForSanitizer()
+public func (sqlbldr *Builder) retrieveQueryTotalsForSanitizer()
 {
-if ( !empty($this->mySqlSanitizer) && $this->mySqlSanitizer->isTotalRowsDesired() )
+if ( !empty(sqlbldr.mySqlSanitizer) && sqlbldr.mySqlSanitizer->isTotalRowsDesired() )
 {
-$theCount = $this->getQueryTotals();
+$theCount = sqlbldr.getQueryTotals();
 if ( !empty($theCount) ) {
-$this->mySqlSanitizer->setPagerTotalRowCount(
+sqlbldr.mySqlSanitizer->setPagerTotalRowCount(
 $theCount['total_rows']
 );
 }
 }
-return $this;
+return sqlbldr
 }
 
 /**
@@ -1248,40 +802,15 @@ return $this;
  * from it and add the SQL limit clause to our SQL string.
  * @return $this Returns $this for chaining.
  * /
-public function applyQueryLimitFromSanitizer()
+public func (sqlbldr *Builder) applyQueryLimitFromSanitizer()
 {
-if ( !empty($this->mySqlSanitizer) )
-return $this->addQueryLimit(
-$this->mySqlSanitizer->getPagerPageSize(),
-$this->mySqlSanitizer->getPagerQueryOffset()
+if ( !empty(sqlbldr.mySqlSanitizer) )
+return sqlbldr.addQueryLimit(
+sqlbldr.mySqlSanitizer->getPagerPageSize(),
+sqlbldr.mySqlSanitizer->getPagerQueryOffset()
 ) ;
 else
-return $this;
+return sqlbldr
 }
 
-/**
- * Return the SQL "LIMIT" expression for our model's database type.
- * @param int $aLimit - the limit we are wishing to impose.
- * @param int $aOffset - (optional) the offset with which to start our limit.
- * @return $this Returns $this for chaining.
- * /
-public function addQueryLimit($aLimit, $aOffset=null)
-{
-if ( $aLimit+0 > 0 ) {
-$theModel = $this->myModel;
-switch ( $theModel->dbType() ) {
-case $theModel::DB_TYPE_MYSQL:
-case $theModel::DB_TYPE_PGSQL:
-default:
-$this->add('LIMIT')->add($aLimit);
-if ( $aOffset+0 > 0 )
-{ $this->add('OFFSET')->add($aOffset); }
-}//switch
-}
-return $this;
-}
-
-}//end class
-
-}//end namespace
 */
