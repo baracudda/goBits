@@ -153,7 +153,15 @@ func (sqlbldr *Builder) StartWith( aSql string ) *Builder {
 // using ApplyFilter().
 func (sqlbldr *Builder) StartFilter() *Builder {
 	sqlbldr.bUseIsNull = true
-	sqlbldr.StartWith("1")
+	driverName := sqlbldr.myDbModel.GetDbMeta().Name
+	switch driverName {
+	case MySQL:
+		sqlbldr.StartWith("1")
+	case PostgreSQL:
+		sqlbldr.StartWith("true")
+	default:
+		sqlbldr.StartWith("true")
+	}//switch
 	return sqlbldr.SetParamPrefix(" AND ")
 }
 
