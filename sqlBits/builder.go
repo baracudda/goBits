@@ -515,6 +515,7 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Bui
 				theEntry += ORDER_BY_ASCENDING
 			}
 			theOrderByList[idx] = theEntry
+			idx += 1
 		}
 		sqlbldr.Add(strings.Join(theOrderByList, ","))
 	}
