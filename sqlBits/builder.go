@@ -543,12 +543,14 @@ func (sqlbldr *Builder) SQL() string {
 	if sqlbldr.myParams != nil && len(sqlbldr.myParams) > 0 &&
 		sqlbldr.myDbModel != nil && !sqlbldr.myDbModel.GetDbMeta().SupportsNamedParams {
 		sqlbldr.myOrdQuerySql = sqlbldr.mySql
+		i := 1
 		for k, v := range sqlbldr.myParams {
 			theOldKey := ":"+k
-			theNewKey := sqlbldr.GetUniqueParamKey("$")
+			theNewKey := "$"+strconv.Itoa(i)
 			if strings.Contains(sqlbldr.myOrdQuerySql, theOldKey) && v != nil {
-				strings.Replace(sqlbldr.myOrdQuerySql, theOldKey, theNewKey, 1)
+				sqlbldr.myOrdQuerySql = strings.Replace(sqlbldr.myOrdQuerySql, theOldKey, theNewKey, 1)
 				sqlbldr.myOrdQueryArgs = append(sqlbldr.myOrdQueryArgs, *v)
+				i += 1
 			}
 		}
 		return sqlbldr.myOrdQuerySql
