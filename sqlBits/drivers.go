@@ -37,6 +37,8 @@ type DriverInfo struct {
 	// The rune used around table/field names in case of spaces and keyword clashes.
 	// Determined by the database type being used (MySQL vs Oracle, etc.).
 	IdentifierDelimiter rune
+	// Not all drivers support named parameters; otherwise restricted to "$1" or "?".
+	SupportsNamedParams bool
 }
 
 var DriverMeta map[reflect.Type]DriverInfo

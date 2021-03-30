@@ -57,6 +57,10 @@ type Builder struct {
 	mySql           string
 	// SQL statement parameters to use (contains all keys from mySetParams, too).
 	myParams        map[string]*string
+	// used by SQL() if driver does not support named parameters
+	myOrdQuerySql   string
+	// used by SQL() if driver does not support named parameters
+	myOrdQueryArgs  *[]string
 	// SQL statement set parameters to use.
 	mySetParams     map[string]*[]string
 	// SQL statement parameter types (not sure if we need them, yet)
@@ -70,7 +74,6 @@ type Builder struct {
 	// if it is part of a SET clause or WHERE clause.  Explicitly set
 	// this flag to let the SqlBuilder know it is in a WHERE clause.
 	bUseIsNull bool
-
 }
 
 // Models can use this package to help build their SQL queries.
@@ -218,18 +221,18 @@ func (sqlbldr *Builder) GetParamSet( aParamKey string ) *[]string {
 
 // Some SQL drivers require all query parameters be unique. This poses an issue when multiple
 // datakeys with the same name are needed in the query (especially true for MERGE queries). This
-// method will check for any existing parameters named $aDataKey and will return a new
+// method will check for any existing parameters named aParamKey and will return a new
 // name with a number for a suffix to ensure its uniqueness.
-func (sqlbldr *Builder) GetUniqueDataKey( aDataKey string ) string {
+func (sqlbldr *Builder) GetUniqueParamKey( aParamKey string ) string {
 	i := 1
-	theDataKey := aDataKey
-	_, bKeyExists := sqlbldr.myParams[theDataKey]
+	theKey := aParamKey
+	_, bKeyExists := sqlbldr.myParams[theKey]
 	for bKeyExists {
 		i += 1
-		theDataKey = aDataKey + strconv.Itoa(i)
-		_, bKeyExists = sqlbldr.myParams[theDataKey]
+		theKey = aParamKey + strconv.Itoa(i)
+		_, bKeyExists = sqlbldr.myParams[theKey]
 	}
-	return theDataKey
+	return theKey
 }
 
 // Some operators require alternate handling during WHERE clauses
@@ -317,6 +320,26 @@ func (sqlbldr *Builder) isDataKeyDefined( aDataKey string ) bool {
 	}
 }
 
+// Adds to the SQL string as a set of values; e.g. "(:paramkey_1,:paramkey_2,:paramkey_N)"
+// Honors the ParamPrefix and ParamOperator properties.
+func (sqlbldr *Builder) addParamAsListForColumn( aColumnName string,
+	aParamKey string, aDataValuesList *[]string,
+) *Builder {
+	if aDataValuesList != nil && len(*aDataValuesList) > 0 {
+		sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColumnName)
+		sqlbldr.mySql += sqlbldr.myParamOperator + "("
+		i := 1
+		for _, val := range *aDataValuesList {
+			theParamKey := aParamKey + "_" + strconv.Itoa(i)
+			i += 1
+			sqlbldr.mySql += ":" + theParamKey + ","
+			sqlbldr.SetParam(theParamKey, val)
+		}
+		sqlbldr.mySql = strings.TrimRight(sqlbldr.mySql, ",") + ")"
+	}
+	return sqlbldr
+}
+
 // Internal method to affect SQL statment with a param and its value.
 func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
 	isSet := sqlbldr.IsParamASet(aParamKey)
@@ -328,7 +351,7 @@ func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
 		case OPERATOR_NOT_EQUAL:
 			sqlbldr.myParamOperator = " NOT IN "
 		}//switch
-		sqlbldr.AddParamAsListForColumn(aColName, aParamKey, valSet)
+		sqlbldr.addParamAsListForColumn(aColName, aParamKey, valSet)
 		sqlbldr.myParamOperator = saveParamOp
 	} else {
 		if val := sqlbldr.GetParam(aParamKey); val != nil || !sqlbldr.bUseIsNull {
@@ -379,27 +402,6 @@ func (sqlbldr *Builder) AddParamForColumnIfDefined( aParamKey string, aColumnNam
 	if sqlbldr.isDataKeyDefined(aParamKey) {
 		sqlbldr.getParamValueFromDataSource(aParamKey)
 		sqlbldr.addingParam(aColumnName, aParamKey)
-	}
-	return sqlbldr
-}
-
-// Adds to the SQL string as a set of values;
-// e.g. "(datakey_1,datakey_2, .. datakey_N)"
-// along with param values set for each of the keys.
-// Honors the ParamPrefix and ParamOperator properties.
-func (sqlbldr *Builder) AddParamAsListForColumn( aColumnName string,
-	aParamKey string, aDataValuesList *[]string ) *Builder {
-	if aDataValuesList != nil && len(*aDataValuesList) > 0 {
-		sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColumnName)
-		sqlbldr.mySql += sqlbldr.myParamOperator + "("
-		i := 1
-		for _, val := range *aDataValuesList {
-			theDataKey := aParamKey + "_" + strconv.Itoa(i)
-			i += 1
-			sqlbldr.mySql += ":" + theDataKey + ","
-			sqlbldr.SetParam(theDataKey, val)
-		}
-		sqlbldr.mySql = strings.TrimRight(sqlbldr.mySql, ",") + ")"
 	}
 	return sqlbldr
 }
@@ -538,7 +540,22 @@ func (sqlbldr *Builder) GetSQLStatement() string {
 
 //Return our currently built SQL statement.
 func (sqlbldr *Builder) SQL() string {
-	return sqlbldr.mySql
+	if sqlbldr.myParams != nil && len(sqlbldr.myParams) > 0 &&
+		sqlbldr.myDbModel != nil && !sqlbldr.myDbModel.GetDbMeta().SupportsNamedParams {
+		sqlbldr.myOrdQueryArgs = &[]string{}
+		sqlbldr.myOrdQuerySql = sqlbldr.mySql
+		for k, v := range sqlbldr.myParams {
+			theOldKey := ":"+k
+			theNewKey := sqlbldr.GetUniqueParamKey("$")
+			if strings.Contains(sqlbldr.myOrdQuerySql, theOldKey) && v != nil {
+				strings.Replace(sqlbldr.myOrdQuerySql, theOldKey, theNewKey, 1)
+				*sqlbldr.myOrdQueryArgs = append(*sqlbldr.myOrdQueryArgs, *v)
+			}
+		}
+		return sqlbldr.myOrdQuerySql
+	} else {
+		return sqlbldr.mySql
+	}
 }
 
 //Return our current SQL params in use.
@@ -559,7 +576,14 @@ func (sqlbldr *Builder) SQLparamSets() map[string]*[]string {
 	}
 }
 
-
+//Return SQL query arguments IFF the driver does not support named parameters.
+func (sqlbldr *Builder) SQLargs() []string {
+	if sqlbldr.myOrdQueryArgs != nil {
+		return *sqlbldr.myOrdQueryArgs
+	} else {
+		return []string{}
+	}
+}
 
 
 /*
