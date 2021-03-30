@@ -75,10 +75,15 @@ type Builder struct {
 
 // Models can use this package to help build their SQL queries.
 func NewBuilder( aDbModeler DbModeler ) *Builder {
-	if aDbModeler == nil { panic("no DbModeler defined!") } //trivial
-	sqlbldr := new(Builder)
+	return new(Builder).WithModel(aDbModeler)
+}
+
+// Initializer like NewBuilder. e.g.: new(Builder).WithModel(aDbModeler)
+func (sqlbldr *Builder) WithModel( aDbModeler DbModeler ) *Builder {
+	if aDbModeler == nil {
+		panic("no DbModeler defined!")
+	}
 	sqlbldr.myDbModel = aDbModeler
-	sqlbldr.myTransactionFlag = 0
 	return sqlbldr.Reset()
 }
 
