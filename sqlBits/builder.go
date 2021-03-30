@@ -288,7 +288,7 @@ func (sqlbldr *Builder) getParamValueFromDataSource( aParamKey string ) *Builder
 func (sqlbldr *Builder) SetParamValueIfNull( aParamKey string, aNewValue string ) *Builder {
 	sqlbldr.getParamValueFromDataSource(aParamKey)
 	isSet := sqlbldr.IsParamASet(aParamKey)
-	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) == 0 {
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && (valSet == nil || len(*valSet) == 0) {
 		sqlbldr.SetParam(aParamKey, aNewValue)
 	} else if !isSet && sqlbldr.GetParam(aParamKey) == nil {
 		sqlbldr.SetParam(aParamKey, aNewValue)
@@ -300,7 +300,7 @@ func (sqlbldr *Builder) SetParamValueIfNull( aParamKey string, aNewValue string 
 func (sqlbldr *Builder) SetParamValueIfEmpty( aParamKey string, aNewValue string ) *Builder {
 	sqlbldr.getParamValueFromDataSource(aParamKey)
 	isSet := sqlbldr.IsParamASet(aParamKey)
-	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) == 0 {
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && (valSet == nil || len(*valSet) == 0) {
 		sqlbldr.SetParam(aParamKey, aNewValue)
 	} else if val := sqlbldr.GetParam(aParamKey) ; !isSet && (val == nil || *val == "" || *val == "0") {
 		sqlbldr.SetParam(aParamKey, aNewValue)
@@ -320,7 +320,7 @@ func (sqlbldr *Builder) isDataKeyDefined( aDataKey string ) bool {
 // Internal method to affect SQL statment with a param and its value.
 func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
 	isSet := sqlbldr.IsParamASet(aParamKey)
-	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && len(*valSet) > 0 {
+	if valSet := sqlbldr.GetParamSet(aParamKey); isSet && valSet != nil && len(*valSet) > 0 {
 		saveParamOp := sqlbldr.myParamOperator
 		switch strings.TrimSpace(sqlbldr.myParamOperator) {
 		case "=":
@@ -407,7 +407,7 @@ func (sqlbldr *Builder) AddParamAsListForColumn( aColumnName string,
 // Adds the list of fields (columns) to the SQL string.
 func (sqlbldr *Builder) AddFieldList( aFieldList *[]string ) *Builder {
 	theFieldListStr := sqlbldr.myParamPrefix + "*"
-	if len(*aFieldList) > 0 {
+	if aFieldList != nil && len(*aFieldList) > 0 {
 		theFieldListStr = sqlbldr.myParamPrefix +
 			strings.Join(*aFieldList, ", "+sqlbldr.myParamPrefix)
 	}
@@ -495,18 +495,20 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Bui
 		 */
 		sqlbldr.Add(theSortKeyword)
 
-		theOrderByList := make([]string, len(*aOrderByList))
-		idx := 0
-		for k, v := range *aOrderByList {
-			theEntry := k + " "
-			if strings.ToUpper(strings.TrimSpace(v))==ORDER_BY_DESCENDING {
-				theEntry += ORDER_BY_DESCENDING
-			} else {
-				theEntry += ORDER_BY_ASCENDING
+		if aOrderByList != nil {
+			theOrderByList := make([]string, len(*aOrderByList))
+			idx := 0
+			for k, v := range *aOrderByList {
+				theEntry := k + " "
+				if strings.ToUpper(strings.TrimSpace(v)) == ORDER_BY_DESCENDING {
+					theEntry += ORDER_BY_DESCENDING
+				} else {
+					theEntry += ORDER_BY_ASCENDING
+				}
+				theOrderByList[idx] = theEntry
 			}
-			theOrderByList[idx] = theEntry
+			sqlbldr.Add(strings.Join(theOrderByList, ","))
 		}
-		sqlbldr.Add(strings.Join(theOrderByList, ","))
 	}
 	return sqlbldr
 }
@@ -516,7 +518,7 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Bui
 // "SELECT /* FIELDLIST */ field1, field2, (SELECT blah) AS field3 /&#42 /FIELDLIST &#42/ FROM</pre>
 // hints in the SQL.
 func (sqlbldr *Builder) ReplaceSelectFieldsWith( aSelectFields *[]string ) *Builder {
-	if len(*aSelectFields) > 0 {
+	if aSelectFields != nil && len(*aSelectFields) > 0 {
 		var re *regexp.Regexp
 		//nested queries can mess us up, so check for hints first
 		if strings.Index(sqlbldr.mySql, FIELD_LIST_HINT_START) > 0 &&
