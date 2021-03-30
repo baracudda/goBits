@@ -527,7 +527,15 @@ func (sqlbldr *Builder) ReplaceSelectFieldsWith( aSelectFields *[]string ) *Buil
 	return sqlbldr
 }
 
+//Return our currently built SQL statement.
+func (sqlbldr *Builder) GetSQLStatement() string {
+	return sqlbldr.mySql
+}
 
+//Return our currently built SQL statement.
+func (sqlbldr *Builder) SQL() string {
+	return sqlbldr.mySql
+}
 
 
 /*
