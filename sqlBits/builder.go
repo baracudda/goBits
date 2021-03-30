@@ -60,7 +60,7 @@ type Builder struct {
 	// used by SQL() if driver does not support named parameters
 	myOrdQuerySql   string
 	// used by SQL() if driver does not support named parameters
-	myOrdQueryArgs  *[]string
+	myOrdQueryArgs  []interface{}
 	// SQL statement set parameters to use.
 	mySetParams     map[string]*[]string
 	// SQL statement parameter types (not sure if we need them, yet)
@@ -542,14 +542,13 @@ func (sqlbldr *Builder) GetSQLStatement() string {
 func (sqlbldr *Builder) SQL() string {
 	if sqlbldr.myParams != nil && len(sqlbldr.myParams) > 0 &&
 		sqlbldr.myDbModel != nil && !sqlbldr.myDbModel.GetDbMeta().SupportsNamedParams {
-		sqlbldr.myOrdQueryArgs = &[]string{}
 		sqlbldr.myOrdQuerySql = sqlbldr.mySql
 		for k, v := range sqlbldr.myParams {
 			theOldKey := ":"+k
 			theNewKey := sqlbldr.GetUniqueParamKey("$")
 			if strings.Contains(sqlbldr.myOrdQuerySql, theOldKey) && v != nil {
 				strings.Replace(sqlbldr.myOrdQuerySql, theOldKey, theNewKey, 1)
-				*sqlbldr.myOrdQueryArgs = append(*sqlbldr.myOrdQueryArgs, *v)
+				sqlbldr.myOrdQueryArgs = append(sqlbldr.myOrdQueryArgs, *v)
 			}
 		}
 		return sqlbldr.myOrdQuerySql
@@ -577,12 +576,8 @@ func (sqlbldr *Builder) SQLparamSets() map[string]*[]string {
 }
 
 //Return SQL query arguments IFF the driver does not support named parameters.
-func (sqlbldr *Builder) SQLargs() []string {
-	if sqlbldr.myOrdQueryArgs != nil {
-		return *sqlbldr.myOrdQueryArgs
-	} else {
-		return []string{}
-	}
+func (sqlbldr *Builder) SQLargs() []interface{} {
+	return sqlbldr.myOrdQueryArgs
 }
 
 
