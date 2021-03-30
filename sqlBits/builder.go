@@ -346,17 +346,21 @@ func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
 }
 
 // Parameter must go into the SQL string regardless of NULL status of data.
-func (sqlbldr *Builder) MustAddParam( aParamKey string, aDefaultValue *string) *Builder {
-	return sqlbldr.MustAddParamForColumn(aParamKey, aParamKey, aDefaultValue)
+func (sqlbldr *Builder) AppendParam( aParamKey string, aParamValue string ) *Builder {
+	sqlbldr.SetParam(aParamKey, aParamValue)
+	sqlbldr.addingParam(aParamKey, aParamKey)
+	return sqlbldr
+}
+
+// Parameter must go into the SQL string regardless of NULL status of data.
+func (sqlbldr *Builder) MustAddParam( aParamKey string ) *Builder {
+	return sqlbldr.MustAddParamForColumn(aParamKey, aParamKey)
 }
 
 // Parameter must go into the SQL string regardless of NULL status of data.
 // This is a "shortcut" designed to combine calls to setParamValue, and addParam.
-func (sqlbldr *Builder) MustAddParamForColumn( aParamKey string, aColumnName string, aDefaultValue *string) *Builder {
+func (sqlbldr *Builder) MustAddParamForColumn( aParamKey string, aColumnName string ) *Builder {
 	sqlbldr.getParamValueFromDataSource(aParamKey)
-	if aDefaultValue != nil {
-		sqlbldr.SetParamValueIfNull(aParamKey, *aDefaultValue)
-	}
 	sqlbldr.addingParam(aColumnName, aParamKey)
 	return sqlbldr
 }
