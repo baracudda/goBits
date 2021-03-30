@@ -495,20 +495,18 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Bui
 		 */
 		sqlbldr.Add(theSortKeyword)
 
-		if aOrderByList != nil {
-			theOrderByList := make([]string, len(*aOrderByList))
-			idx := 0
-			for k, v := range *aOrderByList {
-				theEntry := k + " "
-				if strings.ToUpper(strings.TrimSpace(v)) == ORDER_BY_DESCENDING {
-					theEntry += ORDER_BY_DESCENDING
-				} else {
-					theEntry += ORDER_BY_ASCENDING
-				}
-				theOrderByList[idx] = theEntry
+		theOrderByList := make([]string, len(*aOrderByList))
+		idx := 0
+		for k, v := range *aOrderByList {
+			theEntry := k + " "
+			if strings.ToUpper(strings.TrimSpace(v)) == ORDER_BY_DESCENDING {
+				theEntry += ORDER_BY_DESCENDING
+			} else {
+				theEntry += ORDER_BY_ASCENDING
 			}
-			sqlbldr.Add(strings.Join(theOrderByList, ","))
+			theOrderByList[idx] = theEntry
 		}
+		sqlbldr.Add(strings.Join(theOrderByList, ","))
 	}
 	return sqlbldr
 }
@@ -542,6 +540,26 @@ func (sqlbldr *Builder) GetSQLStatement() string {
 func (sqlbldr *Builder) SQL() string {
 	return sqlbldr.mySql
 }
+
+//Return our current SQL params in use.
+func (sqlbldr *Builder) SQLparams() map[string]*string {
+	if sqlbldr.myParams != nil {
+		return sqlbldr.myParams
+	} else {
+		return map[string]*string{}
+	}
+}
+
+//Return our current SQL param sets in use.
+func (sqlbldr *Builder) SQLparamSets() map[string]*[]string {
+	if sqlbldr.mySetParams != nil {
+		return sqlbldr.mySetParams
+	} else {
+		return map[string]*[]string{}
+	}
+}
+
+
 
 
 /*
@@ -714,40 +732,6 @@ $theResults[$theName] = $theRow[$theName]+0;
 }
 }
 return $theResults;
-}
-
-/**
- * Standardized SQL failure log(s) meant to easily record DbExceptions on the
- * server for postmortem debugging.
- * @param string $aWhatFailed - the thing that failed, typically __METHOD__.
- * @param string|object $aMsgOrException - error message or Exception object.
- * @return SqlBuilder Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) logSqlFailure($aWhatFailed, $aMsgOrException) {
-$theMsg = (is_object($aMsgOrException) && method_exists($aMsgOrException, 'getMessage'))
-? $aMsgOrException->getMessage()
-: $aMsgOrException
-;
-sqlbldr.errorLog($aWhatFailed . ' [1/3] failed: ' . $theMsg);
-sqlbldr.errorLog($aWhatFailed . ' [2/3] sql=' . sqlbldr.mySql);
-sqlbldr.errorLog($aWhatFailed . ' [3/3] params=' . sqlbldr.debugStr(sqlbldr.myParams));
-if ( sqlbldr.getDirector()->isDebugging() &&
-is_callable(array($aMsgOrException, 'getTraceAsString')) )
-{ sqlbldr.errorLog( $aMsgOrException->getTraceAsString() ); }
-return sqlbldr
-}
-
-/**
- * Standardized SQL failure log(s) meant to easily record DbExceptions on the
- * server for postmortem debugging.
- * @param string $aWhatMethod - the thing that you are debugging, typically __METHOD__.
- * @param string $aMsg - (optional) debug message.
- * @return SqlBuilder Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) logSqlDebug($aWhatMethod, $aMsg = '') {
-sqlbldr.debugLog($aWhatMethod . ' [1/2] ' . $aMsg . ' sql=' . sqlbldr.mySql);
-sqlbldr.debugLog($aWhatMethod . ' [2/2] params=' . sqlbldr.debugStr(sqlbldr.myParams));
-return sqlbldr
 }
 
 /**
