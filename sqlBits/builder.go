@@ -33,6 +33,9 @@ type IDataSource interface {
 	GetValueListForKey( aKey string ) *[]string
 }
 
+// Keys are field names, values are either ORDER_BY_* consts: 'ASC' or 'DESC'.
+type OrderByList map[string]string
+
 // Use this class to help build SQL queries.
 // Supports: MySQL and Postgres.
 type Builder struct {
@@ -484,14 +487,12 @@ func (sqlbldr *Builder) ApplyFilter( aFilter *Builder ) *Builder {
 // If sort list is defined and its contents are also contained
 // in the non-empty $aFieldList, then apply the sort order as neccessary.
 // @see ApplyOrderByList() which this method is an alias of.
-func (sqlbldr *Builder) ApplySortList( aSortList *map[string]string ) *Builder {
+func (sqlbldr *Builder) ApplySortList( aSortList *OrderByList ) *Builder {
 	return sqlbldr.ApplyOrderByList(aSortList)
 }
 
 // If order by list is defined, then apply the sort order as neccessary.
-// @param aOrderByList map[string]string - keys are the fields => values are
-//   'ASC' or 'DESC'.
-func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Builder {
+func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *OrderByList ) *Builder {
 	if aOrderByList != nil && sqlbldr.myDbModel != nil {
 		theSortKeyword := "ORDER BY"
 		/* in case we find diff keywords later...
@@ -523,9 +524,8 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *map[string]string ) *Bui
 }
 
 // Replace the currently formed SELECT fields with the param.  If you have nested queries,
-// you will need to use the
-// "SELECT /* FIELDLIST */ field1, field2, (SELECT blah) AS field3 /&#42 /FIELDLIST &#42/ FROM</pre>
-// hints in the SQL.
+// you will need to use the FIELD_LIST_HINT_* consts in the SQL like so:
+// "SELECT /* FIELDLIST */ field1, field2, (SELECT blah) AS field3 /* /FIELDLIST */ FROM"
 func (sqlbldr *Builder) ReplaceSelectFieldsWith( aSelectFields *[]string ) *Builder {
 	if aSelectFields != nil && len(*aSelectFields) > 0 {
 		var re *regexp.Regexp
@@ -590,260 +590,3 @@ func (sqlbldr *Builder) SQLparamSets() map[string]*[]string {
 func (sqlbldr *Builder) SQLargs() []interface{} {
 	return sqlbldr.myOrdQueryArgs
 }
-
-
-/*
-
-/**
- * Set the object used for sanitizing SQL to help prevent SQL Injection attacks.
- * @param ISqlSanitizer $aSqlSanitizer - the object used to sanitize field/orderby lists.
- * @return $this Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) setSanitizer( ISqlSanitizer $aSanitizer=null )
-{
-sqlbldr.mySqlSanitizer = $aSanitizer;
-return sqlbldr
-}
-
-/**
- * Retrieve the order by list from the sanitizer which might be from the UI or a default.
- * @return $this Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) applyOrderByListFromSanitizer()
-{
-if ( !empty(sqlbldr.mySqlSanitizer) )
-return sqlbldr.applyOrderByList( sqlbldr.mySqlSanitizer->getSanitizedOrderByList() ) ;
-else
-return sqlbldr
-}
-
-//=================================================================
-// MAPPED func (sqlbldr *Builder)S TO MODEL
-//=================================================================
-
-/**
- * Execute DML (data manipulation language - INSERT, UPDATE, DELETE) statements.
- * @throws DbException if there is an error.
- * @return number|\PDOStatement Returns the number of rows affected OR if using params,
- *   the PDOStatement.
- * @see \BitsTheater\Model::execDML();
- * /
-public func (sqlbldr *Builder) execDML() {
-return sqlbldr.myModel->execDML(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
-}
-
-/**
- * Executes DML statement and then checks the returned SQLSTATE.
- * @param string|array $aSqlState5digitCodes - standard 5 digit codes to check,
- *   defaults to '02000', meaning "no data"; e.g. UPDATE/DELETE failed due
- *   to record defined by WHERE clause returned no data. May be a comma separated
- *   list of codes or an array of codes to check against.
- * @return boolean Returns the result of the SQLSTATE check.
- * @link https://ib-aid.com/download/docs/firebird-language-reference-2.5/fblangref25-appx02-sqlstates.html
- * /
-public func (sqlbldr *Builder) execDMLandCheck($aSqlState5digitCodes=array(self::SQLSTATE_NO_DATA)) {
-$theExecResult = sqlbldr.execDML();
-if (!empty($aSqlState5digitCodes)) {
-$theStatesToCheck = null;
-if (is_string($aSqlState5digitCodes)) {
-$theStatesToCheck = explode(',', $aSqlState5digitCodes);
-} else if (is_array($aSqlState5digitCodes)) {
-$theStatesToCheck = $aSqlState5digitCodes;
-}
-if (!empty($theStatesToCheck)) {
-$theSqlState = $theExecResult->errorCode();
-return (array_search($theSqlState, $theStatesToCheck, true)!==false);
-}
-}
-return !empty($theExecResult);
-}
-
-/**
- * Executes DML statement and then checks the returned SQLSTATE.
- * @param string $aSqlState5digitCode - a single standard 5 digit code to check,
- *   defaults to '02000', meaning "no data"; e.g. UPDATE/DELETE failed due
- *   to record defined by WHERE clause returned no data.
- * @return boolean Returns the result of the SQLSTATE check.
- * @see SqlBuilder::execDMLandCheck()
- * @link https://dev.mysql.com/doc/refman/5.6/en/error-messages-server.html
- * @link https://ib-aid.com/download/docs/firebird-language-reference-2.5/fblangref25-appx02-sqlstates.html
- * /
-public func (sqlbldr *Builder) execDMLandCheckCode($aSqlState5digitCode=self::SQLSTATE_NO_DATA) {
-return (sqlbldr.execDML()->errorCode()==$aSqlState5digitCode);
-}
-
-/**
- * Execute Select query, returns PDOStatement.
- * @throws DbException if there is an error.
- * @return \PDOStatement on success.
- * @see \BitsTheater\Model::query();
- * /
-public func (sqlbldr *Builder) query() {
-return sqlbldr.myModel->query(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
-}
-
-/**
- * A combination query & fetch a single row, returns null if errored.
- * @see \BitsTheater\Model::getTheRow();
- * /
-public func (sqlbldr *Builder) getTheRow() {
-return sqlbldr.myModel->getTheRow(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
-}
-
-/**
- * SQL Params should be ordered array with ? params OR associative array with :label params.
- * @param array $aListOfParamValues - array of arrays of values for the parameters in the SQL statement.
- * @throws DbException if there is an error.
- * @see \BitsTheater\Model::execMultiDML();
- * /
-public func (sqlbldr *Builder) execMultiDML($aListOfParamValues) {
-return sqlbldr.myModel->execMultiDML(sqlbldr.mySql, $aListOfParamValues, sqlbldr.myParamTypes);
-}
-
-/**
- * Perform an INSERT query and return the new Auto-Inc ID field value for it.
- * Params should be ordered array with ? params OR associative array with :label params.
- * @throws DbException if there is an error.
- * @return int Returns the lastInsertId().
- * @see \BitsTheater\Model::addAndGetId();
- * /
-public func (sqlbldr *Builder) addAndGetId() {
-return sqlbldr.myModel->addAndGetId(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
-}
-
-/**
- * Execute DML (data manipulation language - INSERT, UPDATE, DELETE) statements
- * and return the params used in the query. Convenience method when using
- * parameterized queries since PDOStatement::execDML() always only returns TRUE.
- * @throws DbException if there is an error.
- * @return string[] Returns the param data.
- * @see \PDOStatement::execute();
- * /
-public func (sqlbldr *Builder) execDMLandGetParams()
-{
-sqlbldr.myModel->execDML(sqlbldr.mySql, sqlbldr.myParams, sqlbldr.myParamTypes);
-return sqlbldr.myParams;
-}
-
-/**
- * Sometimes we want to aggregate the query somehow rather than return data from it.
- * @param array $aSqlAggragates - (optional) the aggregation list, defaults to array('count(*)'=>'total_rows').
- * @return array Returns the results of the aggregates.
- * /
-public func (sqlbldr *Builder) getQueryTotals( $aSqlAggragates=array('count(*)'=>'total_rows') )
-{
-$theSqlFields = array();
-foreach ($aSqlAggragates as $theField => $theName)
-array_push($theSqlFields, $theField . ' AS ' . $theName);
-$theSelectFields = implode(', ', $theSqlFields);
-$sqlTotals = sqlbldr.cloneFrom($this);
-try {
-return $sqlTotals->replaceSelectFieldsWith($theSelectFields)
-->getAggregateResults(array_values($aSqlAggragates))
-;
-} catch (\PDOException $pdoe)
-{ throw $sqlTotals->newDbException(__METHOD__, $pdoe); }
-}
-
-/**
- * Execute the currently built SELECT query and retrieve all the aggregates as numbers.
- * @param string[] $aSqlAggragateNames - the aggregate names to retrieve.
- * @return number[] Returns the array of aggregate values.
- * /
-public func (sqlbldr *Builder) getAggregateResults( $aSqlAggragateNames=array('total_rows') )
-{
-$theResults = array();
-//sqlbldr.debugLog(__METHOD__.' sql='.$theSql->mySql.' params='.sqlbldr.debugStr($theSql->myParams));
-$theRow = sqlbldr.getTheRow();
-if (!empty($theRow)) {
-foreach ($aSqlAggragateNames as $theName)
-{
-$theResults[$theName] = $theRow[$theName]+0;
-}
-}
-return $theResults;
-}
-
-/**
- * Providing click-able headers in tables to easily sort them by a particular field
- * is a great UI feature. However, in order to prevent SQL injection attacks, we
- * must double-check that a supplied field name to order the query by is something
- * we can sort on; this method makes use of the <code>Scene::isFieldSortable()</code>
- * method to determine if the browser supplied field name is one of our possible
- * headers that can be clicked on for sorting purposes. The Scene's properties called
- * <code>orderby</code> and <code>orderbyrvs</code> are used to determine the result.
- * @param object $aScene - the object, typically a Scene decendant, which is used
- *   to call <code>isFieldSortable()</code> and access the properties
- *   <code>orderby</code> and <code>orderbyrvs</code>.
- * @param array $aDefaultOrderByList - (optional) default to use if no proper
- *   <code>orderby</code> field was defined.
- * @return array Returns the sanitized OrderBy list.
- * @deprecated Please use SqlBuilder::applyOrderByListFromSanitizer()
- * /
-public func (sqlbldr *Builder) sanitizeOrderByList($aScene, $aDefaultOrderByList=null)
-{
-$theOrderByList = $aDefaultOrderByList;
-if (!empty($aScene) && !empty($aScene->orderby))
-{
-//does the object passed in even define our validation method?
-$theHeaderLabel = (method_exists($aScene, 'isFieldSortable'))
-? $aScene->isFieldSortable($aScene->orderby)
-: null
-;
-//only valid columns we are able to sort on will define a header label
-if (!empty($theHeaderLabel))
-{
-$theSortDirection = null;
-if (isset($aScene->orderbyrvs))
-{
-$theSortDirection = ($aScene->orderbyrvs)
-? self::ORDER_BY_DESCENDING
-: self::ORDER_BY_ASCENDING
-;
-}
-$theOrderByList = array( $aScene->orderby => $theSortDirection );
-}
-}
-return $theOrderByList;
-}
-
-/**
- * If the Sanitizer is using a pager and limiting the query, try to
- * retrieve the overall query total so we can display "page 1 of 20"
- * or equivalent text/widget.<br>
- * NOTE: this method must be called after the SELECT query is defined,
- * but before the OrderBy/Sort and LIMIT clauses are applied to the SQL
- * string.
- * @return $this Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) retrieveQueryTotalsForSanitizer()
-{
-if ( !empty(sqlbldr.mySqlSanitizer) && sqlbldr.mySqlSanitizer->isTotalRowsDesired() )
-{
-$theCount = sqlbldr.getQueryTotals();
-if ( !empty($theCount) ) {
-sqlbldr.mySqlSanitizer->setPagerTotalRowCount(
-$theCount['total_rows']
-);
-}
-}
-return sqlbldr
-}
-
-/**
- * If we have a SqlSanitizer defined, retrieve the query limit information
- * from it and add the SQL limit clause to our SQL string.
- * @return $this Returns $this for chaining.
- * /
-public func (sqlbldr *Builder) applyQueryLimitFromSanitizer()
-{
-if ( !empty(sqlbldr.mySqlSanitizer) )
-return sqlbldr.addQueryLimit(
-sqlbldr.mySqlSanitizer->getPagerPageSize(),
-sqlbldr.mySqlSanitizer->getPagerQueryOffset()
-) ;
-else
-return sqlbldr
-}
-
-*/
