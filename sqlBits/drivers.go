@@ -41,9 +41,9 @@ type DriverInfo struct {
 	SupportsNamedParams bool
 }
 
-var DriverMeta map[reflect.Type]DriverInfo
+var DriverMeta map[reflect.Type]*DriverInfo
 
-func (d DriverInfo) SetDriverName( driverName string ) DriverInfo {
+func (d *DriverInfo) SetDriverName( driverName string ) *DriverInfo {
 	d.Name = DriverName(driverName)
 	switch d.Name {
 	case MySQL:
@@ -58,11 +58,11 @@ func (d DriverInfo) SetDriverName( driverName string ) DriverInfo {
 
 func RegisterDriverInfo( driverName string, dbDriver interface{} ) {
 	driverType := reflect.TypeOf(dbDriver)
-	DriverMeta[driverType] = DriverInfo{Type: driverType}.SetDriverName(driverName)
+	DriverMeta[driverType] = (&DriverInfo{Type: driverType}).SetDriverName(driverName)
 }
 
 func init() {
-	DriverMeta = map[reflect.Type]DriverInfo{}
+	DriverMeta = map[reflect.Type]*DriverInfo{}
 	for _, driverName := range sql.Drivers() {
 		// Tested empty string DSN with MySQL, PostgreSQL, and SQLite3 drivers.
 		db, _ := sql.Open(driverName, "")
@@ -85,8 +85,8 @@ func SqlDriverToDriverName(driver driver.Driver) DriverName {
 
 func GetDriverMeta(dbDriver interface{}) *DriverInfo {
 	driverType := reflect.TypeOf(dbDriver)
-	if driverInfo, found := DriverMeta[driverType]; found {
-		return &driverInfo
+	if _, found := DriverMeta[driverType]; found {
+		return DriverMeta[driverType]
 	}
 	return nil
 }
