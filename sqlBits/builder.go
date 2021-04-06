@@ -590,3 +590,13 @@ func (sqlbldr *Builder) SQLparamSets() map[string]*[]string {
 func (sqlbldr *Builder) SQLargs() []interface{} {
 	return sqlbldr.myOrdQueryArgs
 }
+
+func (sqlbldr *Builder) SQLnamedArgs() map[string]string {
+	theResults := map[string]string{}
+	for k, v := range sqlbldr.myParams {
+		if v != nil {
+			theResults[k] = *v
+		}
+	}
+	return theResults
+}
