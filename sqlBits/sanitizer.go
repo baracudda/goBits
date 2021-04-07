@@ -27,16 +27,38 @@ type ISqlSanitizer interface {
 	GetSanitizedFieldList( aFieldList []string ) []string
 }
 
+// IsExported reports whether the struct field is exported.
+func IsStructFieldExported( f reflect.StructField ) bool {
+	return f.PkgPath == ""
+}
+
+// Custom tag to use for DetermineFieldsFromTableStruct
+var FieldNameTag = ""
+// String-conversion func for struct field name to query field name
+var DefaultFieldNameStrConvFunc = strings.ToLower
+
 // Returns the array of publicly defined fields available.
 func DetermineFieldsFromTableStruct( aTableStruct interface{} ) []string {
 	var theResult []string
 	rowType := reflect.TypeOf(aTableStruct)
 	for i:=0; i<rowType.NumField(); i++ {
-		theName := rowType.Field(i).Name
-		lName := strings.ToLower(theName)
-		//only return "public" fields, "Id!=id" is public, "id==id" is not.
-		if theName != lName {
-			theResult = append(theResult, lName)
+		theField := rowType.Field(i)
+		if IsStructFieldExported(theField) {
+			theName := theField.Name
+			// see if we have a "sql" tag to use
+			theQueryResultName := theField.Tag.Get("sql")
+			if theQueryResultName == "" {
+				// else see if we have a "db" tag to use
+				theQueryResultName = theField.Tag.Get("db")
+			}
+			if theQueryResultName == "" && FieldNameTag != "" {
+				// else see if we have a custom tag to use
+				theQueryResultName = theField.Tag.Get(FieldNameTag)
+			}
+			if theQueryResultName == "" {
+				theQueryResultName = DefaultFieldNameStrConvFunc(theName)
+			}
+			theResult = append(theResult, theQueryResultName)
 		}
 	}
 	return theResult
