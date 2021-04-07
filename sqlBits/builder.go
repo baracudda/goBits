@@ -591,8 +591,8 @@ func (sqlbldr *Builder) SQLargs() []interface{} {
 	return sqlbldr.myOrdQueryArgs
 }
 
-func (sqlbldr *Builder) SQLnamedArgs() map[string]string {
-	theResults := map[string]string{}
+func (sqlbldr *Builder) SQLnamedArgs() map[string]interface{} {
+	theResults := map[string]interface{}{}
 	for k, v := range sqlbldr.myParams {
 		if v != nil {
 			theResults[k] = *v
