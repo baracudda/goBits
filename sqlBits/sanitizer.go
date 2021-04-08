@@ -62,7 +62,7 @@ func DetermineFieldsFromTableStruct( aTableStruct interface{} ) []string {
 				}
 				theResult = append(theResult, theQueryResultName)
 			} else {
-				theEmbeddedFields := DetermineFieldsFromTableStruct(rowVal.Field(i))
+				theEmbeddedFields := DetermineFieldsFromTableStruct(rowVal.Interface())
 				theResult = append(theResult, theEmbeddedFields...)
 			}
 		}
