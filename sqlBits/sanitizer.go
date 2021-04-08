@@ -40,25 +40,31 @@ var DefaultFieldNameStrConvFunc = strings.ToLower
 // DetermineFieldsFromTableStruct Returns the array of publicly defined fields available.
 func DetermineFieldsFromTableStruct( aTableStruct interface{} ) []string {
 	var theResult []string
+	rowVal := reflect.ValueOf(aTableStruct)
 	rowType := reflect.TypeOf(aTableStruct)
 	for i:=0; i<rowType.NumField(); i++ {
 		theField := rowType.Field(i)
 		if IsStructFieldExported(theField) {
-			theName := theField.Name
-			// see if we have a "sql" tag to use
-			theQueryResultName := theField.Tag.Get("sql")
-			if theQueryResultName == "" {
-				// else see if we have a "db" tag to use
-				theQueryResultName = theField.Tag.Get("db")
+			if rowVal.Field(i).Kind() != reflect.Struct {
+				theName := theField.Name
+				// see if we have a "sql" tag to use
+				theQueryResultName := theField.Tag.Get("sql")
+				if theQueryResultName == "" {
+					// else see if we have a "db" tag to use
+					theQueryResultName = theField.Tag.Get("db")
+				}
+				if theQueryResultName == "" && FieldNameTag != "" {
+					// else see if we have a custom tag to use
+					theQueryResultName = theField.Tag.Get(FieldNameTag)
+				}
+				if theQueryResultName == "" {
+					theQueryResultName = DefaultFieldNameStrConvFunc(theName)
+				}
+				theResult = append(theResult, theQueryResultName)
+			} else {
+				theEmbeddedFields := DetermineFieldsFromTableStruct(rowVal.Field(i))
+				theResult = append(theResult, theEmbeddedFields...)
 			}
-			if theQueryResultName == "" && FieldNameTag != "" {
-				// else see if we have a custom tag to use
-				theQueryResultName = theField.Tag.Get(FieldNameTag)
-			}
-			if theQueryResultName == "" {
-				theQueryResultName = DefaultFieldNameStrConvFunc(theName)
-			}
-			theResult = append(theResult, theQueryResultName)
 		}
 	}
 	return theResult
