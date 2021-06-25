@@ -62,6 +62,8 @@ type Builder struct {
 	// if it is part of a SET clause or WHERE clause.  Explicitly set
 	// this flag to let the SqlBuilder know it is in a WHERE clause.
 	bUseIsNull bool
+	// Same as bUseIsNull, but for SET clauses.
+	bUseSetNull bool
 }
 
 // NewBuilder Models can use this package to help build their SQL queries.
@@ -87,6 +89,7 @@ func (sqlbldr *Builder) Reset() *Builder {
 	sqlbldr.myParamPrefix = " "
 	sqlbldr.myParamOperator = "="
 	sqlbldr.bUseIsNull = false
+	sqlbldr.bUseSetNull = false
 	return sqlbldr
 }
 
@@ -167,8 +170,10 @@ func (sqlbldr *Builder) SetParam( aParamKey string, aParamValue string ) *Builde
 
 // SetNullableParam Sets the param value and param type, but does not affect the SQL string.
 func (sqlbldr *Builder) SetNullableParam( aParamKey string, aParamValue *string ) *Builder {
-	sqlbldr.myParams[aParamKey] = aParamValue
-	//sqlbldr.myParamTypes[aParamKey] = "string"
+	//If nil val when bUseSetNull is true, no param created, literal NULL used instead.
+	if aParamValue != nil || !sqlbldr.bUseSetNull {
+		sqlbldr.myParams[aParamKey] = aParamValue
+	}
 	return sqlbldr
 }
 
@@ -243,6 +248,19 @@ func (sqlbldr *Builder) StartWhereClause() *Builder {
 // EndWhereClause Resets the WHERE clause flag.
 func (sqlbldr *Builder) EndWhereClause() *Builder {
 	sqlbldr.bUseIsNull = false
+	return sqlbldr
+}
+
+// StartSetClause Some operators require alternate handling during a SET
+// clause (e.g. "=" with NULLs).
+func (sqlbldr *Builder) StartSetClause() *Builder {
+	sqlbldr.bUseSetNull = true
+	return sqlbldr
+}
+
+// EndSetClause Resets the SET clause flag.
+func (sqlbldr *Builder) EndSetClause() *Builder {
+	sqlbldr.bUseSetNull = false
 	return sqlbldr
 }
 
@@ -353,8 +371,12 @@ func (sqlbldr *Builder) addingParam( aColName string, aParamKey string ) {
 		sqlbldr.myParamOperator = saveParamOp
 	} else {
 		if val := sqlbldr.GetParam(aParamKey); val != nil || !sqlbldr.bUseIsNull {
-			sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColName) +
-				sqlbldr.myParamOperator + ":" + aParamKey
+			sqlbldr.mySql += sqlbldr.myParamPrefix + sqlbldr.GetQuoted(aColName) + sqlbldr.myParamOperator
+			if val != nil || !sqlbldr.bUseSetNull {
+				sqlbldr.mySql += ":" + aParamKey
+			} else {
+				sqlbldr.mySql += "NULL"
+			}
 		} else {
 			switch strings.TrimSpace(sqlbldr.myParamOperator) {
 			case "=":
@@ -490,7 +512,7 @@ func (sqlbldr *Builder) ApplyOrderByList( aOrderByList *OrderByList ) *Builder {
 		default:
 			theSortKeyword = "ORDER BY"
 		}//switch
-		 */
+		*/
 		sqlbldr.Add(theSortKeyword)
 
 		theOrderByList := make([]string, len(*aOrderByList))
